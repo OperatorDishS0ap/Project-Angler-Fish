@@ -1,0 +1,40 @@
+I need to convert controller data from a ps5 controller on my pc to send it to my pi to
+control a remote control submarine. I have this code for my pc controller “sim_ps5.py”.
+The script “motor_controller.py” will control the motors on the pi. Add the code to these
+files. There are four brushless bidirectional motors controlled by ESC’s. The tables below
+outline the corresponding movements, directions, motors, and buttons.
+Button Movement Motor 1 (%)
+Min → Max
+Motor 2 (%) Motor 3 (%) Motor 4 (%) Movement
+Type
+R2 Forward 0 → 100 0 → 100 Not used Not used Linear
+L2 Reverse 0 → -100 0 → -100 Not used Not used Linear
+D-pad UP Up Not used Not used 0 → 20 0 → 20 Linear
+D-pad Down Down Not used Not used 0 → -20 0 → -20 Linear
+D-pad Left Rotate
+Left
+Not Used Not used -20 20 Differential
+D-pad Right Rotate
+Right
+Not Used Not used 20 -20 Differential
+Right Analog
+Left
+Roll Left 0 → -20 0 → 20 Not Used Not Used Differential
+Right Analog
+Right
+Roll Right 0 → 20 0 → -20 Not Used Not Used Differential
+Left Analog
+Up
+Up Not used Not used 0 → 20 0 → 20 Linear
+Left Analog
+Down
+Down Not used Not used 0 → -20 0 → -20 Linear
+Motor Placement
+Motor 1 (Z axis) Port Bow Motor 2 (Z axis) Starboard Bow
+Motor 3 (Y axis) Port Stern Motor 4 (Y axis) Starboard Stern
+Raw Controller Data
+Button Min Value Max Value
+Left Analog (Up/Down) -1: Up +1: Down
+Right Analog (Right/Left) -1: Left +1: Right
+L2 -1: Base State +1: Fully Depressed
+R2 -1: Base State +1: Fully Depressed
