@@ -15,6 +15,7 @@ PI_SSH_HOST = "10.42.0.50"      # Pi's Ethernet IP
 PI_SSH_USER = "pi"              # Pi username
 PI_SSH_PASSWORD = "raspberry"   # <--- CHANGE THIS
 PI_COMMAND = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
+PI_UPDATE = "cd ~/Project-Angler-Fish && git pull"
 
 def start_launcher_on_pi():
     """Connect to Pi using SSH (with password) and run the launcher command."""
@@ -33,7 +34,20 @@ def start_launcher_on_pi():
             timeout=5
         )
 
-        print("[SSH] Connected! Running launcher...")
+        print("[SSH] Connected! Updating ROV Files")
+        stdin, stdout, stderr = client.exec_command(PI_UPDATE)
+
+        out = stdout.read().decode()
+        err = stderr.read().decode()
+
+        if out.strip():
+            print("[SSH STDOUT]\n" + out)
+        if err.strip():
+            print("[SSH STDERR]\n" + err)
+
+        print("[SSH] Updated successfully!")
+
+        print("Running launcher...")
         stdin, stdout, stderr = client.exec_command(PI_COMMAND)
 
         out = stdout.read().decode()
