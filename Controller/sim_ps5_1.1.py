@@ -11,7 +11,7 @@ import paramiko
 # ------------------------
 # SSH SETTINGS TO START LAUNCHER ON PI
 # ------------------------
-PI_SSH_HOST = "10.42.0.50"      # Pi's Ethernet IP
+PI_SSH_HOST = "192.168.1.139"      # Pi's Ethernet IP  ##10.42.0.50
 PI_SSH_USER = "pi"              # Pi username
 PI_SSH_PASSWORD = "raspberry"   # <--- CHANGE THIS
 PI_COMMAND = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
