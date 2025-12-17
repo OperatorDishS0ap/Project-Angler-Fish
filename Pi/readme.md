@@ -17,7 +17,11 @@ sudo apt install -y git
 
 Add Files:
 ```
-git clone https://github.com/OperatorDishS0ap/Project-Angler-Fish.git
+git clone --filter=blob:none --no-checkout https://github.com/OperatorDishS0ap/Project-Angler-Fish.git
+cd Project-Angler-Fish
+git sparse-checkout init --cone
+git sparse-checkout set Pi
+git checkout main
 ```
 
 To Update Files:
