@@ -1,1 +1,0 @@
-For PC Controller Ubuntu
