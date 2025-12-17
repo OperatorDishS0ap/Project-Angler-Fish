@@ -10,7 +10,7 @@ sudo apt update
 sudo apt upgrade
 ```
 
-Install git
+Install git:
 ```
 sudo apt install -y git
 ```
