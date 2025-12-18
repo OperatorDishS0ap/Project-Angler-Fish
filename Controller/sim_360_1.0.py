@@ -10,7 +10,7 @@ import paramiko
 # ==========================================================
 # SSH SETTINGS (START LAUNCHER ON PI)
 # ==========================================================
-PI_SSH_HOST = "192.168.1.139"
+PI_SSH_HOST = "172.16.3.25"
 PI_SSH_USER = "pi"
 PI_SSH_PASSWORD = "raspberry"
 PI_COMMAND = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
