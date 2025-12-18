@@ -9,7 +9,7 @@ PORT = 8000        # You can change this, but use the same in the client
 
 def main():
     # Open the USB camera (usually index 0)
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         print("Error: Could not open camera.")
         return
