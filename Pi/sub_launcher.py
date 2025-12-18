@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 scripts = [
     BASE_DIR / "camera_controller.py",
-#    BASE_DIR / "motor_controller_1.0.py",
+    BASE_DIR / "motor_controller_1.0.py",
     BASE_DIR / "sensor_controller.py",
 ]
 
