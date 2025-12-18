@@ -10,7 +10,7 @@ import paramiko
 # ==========================================================
 # SSH SETTINGS (START LAUNCHER ON PI)
 # ==========================================================
-PI_SSH_HOST = "172.16.3.25"
+PI_SSH_HOST = "172.16.3.52" #"10.42.0.242"
 PI_SSH_USER = "pi"
 PI_SSH_PASSWORD = "raspberry"
 PI_COMMAND = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
@@ -21,7 +21,9 @@ def start_launcher_on_pi():
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         client.connect(PI_SSH_HOST, username=PI_SSH_USER, password=PI_SSH_PASSWORD, timeout=5)
-        client.exec_command(PI_UPDATE)
+        # print("Connected Updating")
+        # client.exec_command(PI_UPDATE)
+        # time.sleep(2)
         client.exec_command(PI_COMMAND)
         print("[SSH] Launcher started on Pi")
     except Exception as e:
@@ -80,26 +82,29 @@ VERT_MAX = 0.20
 ROT_MAX  = 0.20
 
 def compute_motors(lx, ly, rx, l2, r2, hat_x, hat_y):
+    # Triggers -> now control M3/M4 (surge)
     fwd = (r2 + 1) * 0.5
     rev = (l2 + 1) * 0.5
     surge = fwd - rev
 
-    m1 = surge
-    m2 = surge
+    m3 = surge
+    m4 = surge
 
+    # Right stick X (roll/yaw trim) -> applies to surge pair (M3/M4)
     if abs(rx) > 0.1:
         roll = rx * ROLL_MAX
-        m1 += roll
-        m2 -= roll
+        m3 += roll
+        m4 -= roll
 
+    # Left stick Y + D-pad -> now control M1/M2 (vertical + rotation)
     vert = 0
     if abs(ly) > 0.1:
         vert = -ly * VERT_MAX
     if abs(hat_y) > abs(vert):
         vert = hat_y * VERT_MAX
 
-    m3 = vert + hat_x * ROT_MAX
-    m4 = vert - hat_x * ROT_MAX
+    m1 = vert + hat_x * ROT_MAX
+    m2 = vert - hat_x * ROT_MAX
 
     return tuple(clamp(v, -1, 1) for v in (m1, m2, m3, m4))
 
@@ -120,7 +125,7 @@ print("Connected Controller:", js.get_name())
 # START PI SYSTEM
 # ==========================================================
 start_launcher_on_pi()
-time.sleep(5)
+time.sleep(1)
 
 # ==========================================================
 # SOCKETS
@@ -159,8 +164,15 @@ while True:
 
     m1, m2, m3, m4 = compute_motors(lx, ly, rx, l2, r2, hat_x, hat_y)
 
-    pkt = struct.pack(CMD_FMT, CMD_MAGIC, seq, throttle_to_i16(m1),
-                      throttle_to_i16(m2), throttle_to_i16(m3), throttle_to_i16(m4))
+    pkt = struct.pack(
+        CMD_FMT,
+        CMD_MAGIC,
+        seq,
+        throttle_to_i16(m1),
+        throttle_to_i16(m2),
+        throttle_to_i16(m3),
+        throttle_to_i16(m4),
+    )
     motor_sock.sendto(pkt, (HOST, MOTOR_PORT))
     seq += 1
 
