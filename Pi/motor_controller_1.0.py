@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """motor_controller.py (Raspberry Pi)
 
 - Drives 4 bidirectional ESCs via 50 Hz PWM (RPi.GPIO).
@@ -93,7 +93,7 @@ def main():
 
     esc_pwms = []
     for pin in ESC_PINS:
-        GPIO.setup(pin, GPIO.OUT)
+        GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
         pwm = GPIO.PWM(pin, PWM_FREQ)
         pwm.start(0.0)
         esc_pwms.append(pwm)
