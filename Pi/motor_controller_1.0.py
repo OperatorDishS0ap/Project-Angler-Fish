@@ -20,6 +20,8 @@ Telemetry back to PC (optional, binary):
     armed  uint8 (1 if receiving commands recently, else 0)
 """
 
+##ajnsd
+
 import time
 import socket
 import struct
