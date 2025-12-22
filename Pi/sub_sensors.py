@@ -5,7 +5,7 @@ import random
 import socket
 import time
 
-PC_IP = os.environ.get("ANGLERFISH_PC_IP", "10.42.0.1")  # set to your Windows ethernet IP
+PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.1.84")  # set to your Windows ethernet IP
 PC_PORT = 9100
 RATE_HZ = 5.0
 
