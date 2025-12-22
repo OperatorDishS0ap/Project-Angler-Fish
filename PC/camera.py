@@ -2,7 +2,7 @@ import socket
 import struct
 import threading
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -46,9 +46,7 @@ class CameraClient:
 
     def get_frame(self) -> Optional[np.ndarray]:
         with self._lock:
-            if self._latest_frame is None:
-                return None
-            return self._latest_frame.copy()
+            return None if self._latest_frame is None else self._latest_frame.copy()
 
     def _recv_exact(self, n: int) -> Optional[bytes]:
         buf = b""

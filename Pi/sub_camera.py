@@ -5,15 +5,13 @@ import time
 
 import cv2
 
-
 HOST = "0.0.0.0"
 PORT = 8000
-CAM_INDEX = 0
+CAM_INDEX = 0  # USB camera
 WIDTH = 640
 HEIGHT = 480
 FPS = 30
 JPEG_QUALITY = 75
-
 
 def main():
     cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
@@ -50,7 +48,6 @@ def main():
                 conn.close()
             except Exception:
                 pass
-
 
 if __name__ == "__main__":
     main()

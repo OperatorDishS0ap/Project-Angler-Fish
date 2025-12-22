@@ -5,15 +5,12 @@ import subprocess
 import sys
 import time
 
-
 SCRIPTS = [
     ("camera", "sub_camera.py"),
     ("motors", "sub_motors.py"),
     ("sensors", "sub_sensors.py"),
 ]
-
 PROCS = {}
-
 
 def start_all():
     base = os.path.dirname(os.path.abspath(__file__))
@@ -22,18 +19,15 @@ def start_all():
         if not os.path.exists(path):
             print(f"[launcher] Missing: {path}")
             continue
-        # Start each script as its own process group so we can kill it easily.
         p = subprocess.Popen([sys.executable, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              preexec_fn=os.setsid)
         PROCS[name] = p
         print(f"[launcher] started {name} pid={p.pid}")
         time.sleep(0.2)
 
-
 def stop_all():
     for name, p in PROCS.items():
         try:
-            print(f"[launcher] stopping {name} pid={p.pid}")
             os.killpg(os.getpgid(p.pid), signal.SIGTERM)
         except Exception:
             pass
@@ -45,21 +39,16 @@ def stop_all():
         except Exception:
             pass
 
-
 def _handle(sig, frame):
-    print(f"[launcher] signal {sig}, shutting down...")
     stop_all()
     sys.exit(0)
-
 
 def main():
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
     start_all()
-    # Keep alive
     while True:
         time.sleep(1.0)
-
 
 if __name__ == "__main__":
     main()

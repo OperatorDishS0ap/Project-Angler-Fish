@@ -3,12 +3,10 @@ import os
 import threading
 import time
 import tkinter as tk
-from dataclasses import asdict
 from tkinter import ttk, messagebox
 
 import cv2
 from PIL import Image, ImageTk  # pillow
-
 import paramiko
 
 from camera import CameraClient
@@ -44,10 +42,7 @@ class StatusBox(ttk.Frame):
         self.set_connected(False)
 
     def set_connected(self, connected: bool, text: str | None = None):
-        if text is not None:
-            self.var.set(text)
-        else:
-            self.var.set("Connected" if connected else "Disconnected")
+        self.var.set(text if text is not None else ("Connected" if connected else "Disconnected"))
         self.label.configure(bg=("light green" if connected else "tomato"))
 
     def set_text(self, text: str):
@@ -60,7 +55,6 @@ class AnglerFishApp(tk.Tk):
         self.title("Project Angler Fish")
         self.geometry("1200x700")
 
-        # ---------- state ----------
         cfg = load_config()
         self.pi_ip = tk.StringVar(value=cfg.get("ip", "10.42.0.50"))
         self.pi_user = tk.StringVar(value=cfg.get("user", "pi"))
@@ -76,7 +70,6 @@ class AnglerFishApp(tk.Tk):
         self.motor_sender = None
         self.controller = None
 
-        # ---------- pages ----------
         self.page1 = ttk.Frame(self)
         self.page2 = ttk.Frame(self)
 
@@ -84,10 +77,9 @@ class AnglerFishApp(tk.Tk):
         self._build_page2()
 
         self.page1.pack(fill="both", expand=True)
-
         self._ui_loop()
 
-    # ----------------- SSH helpers -----------------
+    # SSH helpers
     def _ssh_connect(self):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -101,12 +93,11 @@ class AnglerFishApp(tk.Tk):
         err = stderr.read()
         return _.decode("utf-8", errors="ignore"), err.decode("utf-8", errors="ignore")
 
-    # ----------------- Page 1 -----------------
+    # Page 1
     def _build_page1(self):
         f = self.page1
 
-        title = ttk.Label(f, text="Project Angler Fish", font=("Segoe UI", 20, "bold"))
-        title.pack(pady=12)
+        ttk.Label(f, text="Project Angler Fish", font=("Segoe UI", 20, "bold")).pack(pady=12)
 
         form = ttk.Frame(f)
         form.pack(pady=10)
@@ -156,8 +147,6 @@ class AnglerFishApp(tk.Tk):
                 self.status1.set_connected(True, "Connected")
                 client = self._ssh_connect()
                 self.status1.set_text("Updating Files")
-                # Match GUI.pdf steps: cd then git pull then wait 6 seconds
-                self._ssh_run(client, "cd ~/Project-Angler-Fish")
                 self._ssh_run(client, "cd ~/Project-Angler-Fish && git pull")
                 time.sleep(6)
                 client.close()
@@ -175,7 +164,6 @@ class AnglerFishApp(tk.Tk):
             try:
                 self.status1.set_connected(True, "Connected")
                 client = self._ssh_connect()
-                # Start launcher (nohup) then disconnect and switch pages after 2s
                 cmd = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
                 self._ssh_run(client, cmd)
                 client.close()
@@ -189,7 +177,7 @@ class AnglerFishApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ----------------- Page 2 -----------------
+    # Page 2
     def _build_page2(self):
         f = self.page2
 
@@ -197,25 +185,29 @@ class AnglerFishApp(tk.Tk):
         top.pack(fill="x", pady=6)
 
         ttk.Label(top, text="Project Angler Fish - Live", font=("Segoe UI", 16, "bold")).pack(side="left", padx=10)
-
         self.status2 = StatusBox(top)
         self.status2.pack(side="left", padx=10)
-
         ttk.Button(top, text="Shutdown Submarine", command=self._on_shutdown).pack(side="right", padx=10)
 
         body = ttk.Frame(f)
         body.pack(fill="both", expand=True)
 
-        # Video area
+        # Grid layout prevents the video widget from pushing/covering the right panel.
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=0)
+        body.rowconfigure(0, weight=1)
+
         video_frame = ttk.Frame(body)
-        video_frame.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        video_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        video_frame.columnconfigure(0, weight=1)
+        video_frame.rowconfigure(0, weight=1)
 
         self.video_label = tk.Label(video_frame, text="Waiting for video...", bg="black", fg="white")
-        self.video_label.pack(fill="both", expand=True)
+        self.video_label.grid(row=0, column=0, sticky="nsew")
 
-        # Telemetry + motors
-        side = ttk.Frame(body)
-        side.pack(side="right", fill="y", padx=10, pady=10)
+        side = ttk.Frame(body, width=320)
+        side.grid(row=0, column=1, sticky="ns", padx=10, pady=10)
+        side.grid_propagate(False)
 
         self.battery_var = tk.StringVar(value="Battery: -- V")
         self.depth_var = tk.StringVar(value="Depth: --")
@@ -250,23 +242,19 @@ class AnglerFishApp(tk.Tk):
         self.page1.pack(fill="both", expand=True)
 
     def _start_runtime_clients(self):
-        # Start timer
         self.start_time = time.time()
         self.running = True
 
-        # Start camera receiver
         self.camera_client = CameraClient(self.pi_ip.get().strip(), port=8000, reconnect=True)
         self.camera_client.start()
 
-        # Start sensor receiver
         self.sensor_rx = SensorUdpReceiver(listen_port=9100)
         self.sensor_rx.start()
 
-        # Start controller + motor sender
         try:
             self.controller = XboxControllerReader()
         except Exception as e:
-            messagebox.showwarning("Controller", f"Controller not ready: {e}\nYou can plug it in and restart the GUI.")
+            messagebox.showwarning("Controller", f"Controller not ready: {e}")
             self.controller = None
 
         self.motor_sender = MotorUdpSender(self.pi_ip.get().strip(), pi_port=9000, rate_hz=30.0)
@@ -293,14 +281,12 @@ class AnglerFishApp(tk.Tk):
                 self.status2.set_connected(True, "Connected")
                 self.status2.set_text("Terminating")
                 client = self._ssh_connect()
-                # GUI.pdf asks to terminate in order. We'll attempt both possible names.
-                kill_list = [
+                for name in [
                     "sub_launcher.py",
                     "sensor_controller.py", "sub_sensors.py",
                     "motor_controller.py", "sub_motors.py",
                     "camera_controller.py", "sub_camera.py",
-                ]
-                for name in kill_list:
+                ]:
                     self._ssh_run(client, f"pkill -f {name} || true")
                     time.sleep(0.2)
                 client.close()
@@ -314,16 +300,13 @@ class AnglerFishApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ----------------- UI loop -----------------
     def _ui_loop(self):
-        # Update status from camera connected state (not SSH)
         if self.page2.winfo_ismapped():
             if self.camera_client and self.camera_client.connected:
                 self.status2.set_connected(True, "Connected")
             else:
                 self.status2.set_connected(False, "Disconnected")
 
-            # Update telemetry
             if self.sensor_rx:
                 t = self.sensor_rx.latest
                 self.battery_var.set(f"Battery: {t.battery:.2f} V")
@@ -331,7 +314,6 @@ class AnglerFishApp(tk.Tk):
                 self.press_var.set(f"Pressure: {t.pressure:.2f}")
                 self.temp_var.set(f"Temps: Pi {t.temp_pi:.1f} C | Env {t.temp_env:.1f} C")
 
-            # Update controller -> motor sender
             if self.controller and self.motor_sender:
                 cmd = self.controller.poll()
                 self.motor_sender.set_target(cmd)
@@ -340,34 +322,28 @@ class AnglerFishApp(tk.Tk):
                 self.m3_var.set(f"M3: {cmd.m3:.0f}")
                 self.m4_var.set(f"M4: {cmd.m4:.0f}")
 
-            # Timer
             if self.start_time:
                 elapsed = int(time.time() - self.start_time)
                 mm, ss = divmod(elapsed, 60)
                 self.timer_var.set(f"Timer: {mm:02d}:{ss:02d}")
 
-            # Video frame
             if self.camera_client:
                 frame = self.camera_client.get_frame()
                 if frame is not None:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     img = Image.fromarray(frame)
-                    # Fit to label size
+
                     w = max(1, self.video_label.winfo_width())
                     h = max(1, self.video_label.winfo_height())
                     img = img.resize((w, h))
+
                     imgtk = ImageTk.PhotoImage(image=img)
                     self.video_label.imgtk = imgtk
                     self.video_label.configure(image=imgtk, text="")
 
-        self.after(33, self._ui_loop)  # ~30 FPS UI updates
+        self.after(33, self._ui_loop)
 
 
 if __name__ == "__main__":
-    try:
-        import PIL  # noqa: F401
-    except Exception:
-        raise SystemExit("Missing dependency: pillow. Install with: pip install pillow")
-
     app = AnglerFishApp()
     app.mainloop()
