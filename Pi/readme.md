@@ -1,6 +1,7 @@
 For the Pi Zero 2W Submarine Controller
 
-Install Raspberry Pi OS Lite (32bit)
+Install Raspberry Pi OS Lite (64bit)
+From termina
 
 Connect to Pi via SSH
 
@@ -12,7 +13,7 @@ sudo apt upgrade
 
 Install Python Packages:
 ```
-sudo apt install -y python3-opencv python3-pip python3-gpiozero
+sudo apt install -y python3-opencv python3-numpy python3-gpiozero
 ```
 
 Install git:
