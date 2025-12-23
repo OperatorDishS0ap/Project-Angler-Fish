@@ -1,7 +1,15 @@
 For the Pi Zero 2W Submarine Controller
 
 Install Raspberry Pi OS Lite (64bit)
-From termina
+
+From the terminal use this command to find the IP address of the PI
+```
+ping [hostname]
+```
+Example:
+```
+ping anglerfish
+```
 
 Connect to Pi via SSH
 
