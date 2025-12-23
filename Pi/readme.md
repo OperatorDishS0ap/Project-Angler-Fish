@@ -10,6 +10,11 @@ sudo apt update
 sudo apt upgrade
 ```
 
+Install Python Packages:
+```
+sudo apt install -y python3-opencv python3-pip python3-gpiozero
+```
+
 Install git:
 ```
 sudo apt install -y git
