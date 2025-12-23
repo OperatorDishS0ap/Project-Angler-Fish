@@ -43,3 +43,4 @@ To Update Files:
 cd ~/Project-Angler-Fish
 git pull
 ```
+Given the files are corrupted or changed on the raspberry pi delete the the folder and re-add the repository files.
