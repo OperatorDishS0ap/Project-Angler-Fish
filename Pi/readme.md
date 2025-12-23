@@ -21,7 +21,7 @@ sudo apt upgrade
 
 Install Python Packages:
 ```
-sudo apt install -y python3-opencv python3-numpy python3-gpiozero
+sudo apt install -y python3-opencv python3-numpy python3-gpiozero python3-picamera2
 ```
 
 Install git:
