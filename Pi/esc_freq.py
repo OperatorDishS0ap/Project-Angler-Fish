@@ -5,7 +5,7 @@ import pigpio
 # =========================
 # CONFIG
 # =========================
-GPIO_ESC = 18          # GPIO to probe
+GPIO_ESC = 13          # GPIO to probe
 ESC_FREQ = 400         # Hz (fixed)
 PERIOD_US = int(1_000_000 / ESC_FREQ)  # 2500 us
 
