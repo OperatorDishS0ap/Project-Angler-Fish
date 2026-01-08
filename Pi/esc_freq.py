@@ -6,19 +6,14 @@ import pigpio
 # CONFIG
 # =========================
 GPIO_ESC = 13          # GPIO to probe
-ESC_FREQ = 400         # Hz (fixed)
+ESC_FREQ = 400         # Hz
 PERIOD_US = int(1_000_000 / ESC_FREQ)  # 2500 us
 
-# Pulse widths to test (µs)
-TEST_PULSES = [
-    1100,
-    1300,
-    1500,  # NEUTRAL
-    1700,
-    1900,
-]
+START_US = 500
+END_US   = 2500
+STEP_US  = 50
 
-DWELL_TIME = 4.0       # seconds per pulse width
+DWELL_TIME = 1.0       # seconds per step
 
 # =========================
 # SETUP
@@ -29,25 +24,26 @@ if not pi.connected:
 
 pi.set_mode(GPIO_ESC, pigpio.OUTPUT)
 
-# IMPORTANT: disable servo mode (50 Hz)
+# Disable servo mode (important)
 pi.set_servo_pulsewidth(GPIO_ESC, 0)
 
-# Configure PWM for 400 Hz
+# Configure PWM @ 400 Hz
 pi.set_PWM_frequency(GPIO_ESC, ESC_FREQ)
-pi.set_PWM_range(GPIO_ESC, PERIOD_US)  # 1 count = 1 us
+pi.set_PWM_range(GPIO_ESC, PERIOD_US)   # 1 count = 1 µs
 
-print("PWM pulse-width test @ 400 Hz")
-print("GPIO:", GPIO_ESC)
-print("Period:", PERIOD_US, "us")
+print("PWM pulse-width sweep @ 400 Hz")
+print(f"GPIO {GPIO_ESC}")
+print(f"Period: {PERIOD_US} us")
+print(f"Sweeping {START_US} → {END_US} us in {STEP_US} us steps")
 print("Probe with oscilloscope\n")
 
 try:
-    for pulse in TEST_PULSES:
+    for pulse in range(START_US, END_US + STEP_US, STEP_US):
         print(f"Pulse width: {pulse} us")
         pi.set_PWM_dutycycle(GPIO_ESC, pulse)
         time.sleep(DWELL_TIME)
 
-    print("\nTest complete. Holding neutral.")
+    print("\nSweep complete. Holding neutral (1500 us).")
 
 finally:
     pi.set_PWM_dutycycle(GPIO_ESC, 1500)
