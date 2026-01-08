@@ -3,14 +3,19 @@
 sub_motors_400hz_pigpio.py
 
 UDP-controlled 4x ESC output at 400 Hz using pigpio *PWM mode*
-(so the scope should show ~400 Hz, period ~2.5 ms).
+(scope should show ~400 Hz, period ~2.5 ms).
 
 - Supports legacy binary packets: "<4sI4h" with magic b"SUB1"
 - Supports JSON fallback: {"m1":..,"m2":..,"m3":..,"m4":..}
-- Failsafe: if no command for COMMAND_TIMEOUT_S -> all motors neutral (0%)
+- Failsafe: if no command for COMMAND_TIMEOUT_S -> all motors neutral band
 
 Wiring:
 M1=GPIO18, M2=GPIO12, M3=GPIO13, M4=GPIO19
+
+Calibration (per your measurement):
+- Valid pulse range: 800..2100 us
+- Neutral band: 1500..1600 us
+  (we hold center at 1550 us and clamp small commands into the band)
 """
 
 import json
@@ -43,13 +48,21 @@ ESC_FREQ_HZ = 400
 PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
 PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
 
-PULSE_NEUTRAL = 1500
-PULSE_MIN = 1300
-PULSE_MAX = 1700
+# Calibrated limits
+PULSE_MIN = 800
+PULSE_MAX = 2100
+
+# Neutral band (measured)
+PULSE_NEUTRAL_LO = 1500
+PULSE_NEUTRAL_HI = 1600
+PULSE_NEUTRAL_C  = (PULSE_NEUTRAL_LO + PULSE_NEUTRAL_HI) // 2  # 1550
 
 ARM_TIME_S = 3.0
 COMMAND_TIMEOUT_S = 0.5
 LOOP_SLEEP_S = 0.005
+
+# Optional: if command magnitude is very small, force neutral band
+PCT_DEADBAND = 2.0  # percent
 
 # -------------------------
 # LEGACY BINARY PROTOCOL
@@ -70,13 +83,24 @@ def i16_to_pct(v_i16: int) -> float:
 
 def pct_to_pulse_us(pct: float) -> int:
     """
-    Map -100..+100% to PULSE_MIN..PULSE_MAX with neutral at 0%.
+    Map -100..+100% to [PULSE_MIN..PULSE_MAX] with a neutral *band*.
+
+    We treat neutral as centered at PULSE_NEUTRAL_C (1550us),
+    and for small pct values we force the output into the neutral band
+    so the ESC doesn't creep.
     """
     pct = clamp(pct, -100.0, 100.0)
-    if pct >= 0:
-        return int(PULSE_NEUTRAL + (PULSE_MAX - PULSE_NEUTRAL) * (pct / 100.0))
+
+    # Deadband near zero -> hold neutral center (or you can randomize within band)
+    if abs(pct) <= PCT_DEADBAND:
+        return PULSE_NEUTRAL_C
+
+    if pct > 0:
+        # scale forward from neutral_hi -> max
+        return int(PULSE_NEUTRAL_HI + (PULSE_MAX - PULSE_NEUTRAL_HI) * (pct / 100.0))
     else:
-        return int(PULSE_NEUTRAL + (PULSE_NEUTRAL - PULSE_MIN) * (pct / 100.0))
+        # scale reverse from neutral_lo -> min
+        return int(PULSE_NEUTRAL_LO + (PULSE_NEUTRAL_LO - PULSE_MIN) * (pct / 100.0))
 
 
 def setup_pwm_esc(pi: pigpio.pi, gpio: int):
@@ -92,8 +116,8 @@ def setup_pwm_esc(pi: pigpio.pi, gpio: int):
     pi.set_PWM_frequency(gpio, ESC_FREQ_HZ)
     pi.set_PWM_range(gpio, PWM_RANGE)
 
-    # Neutral output to arm
-    pi.set_PWM_dutycycle(gpio, PULSE_NEUTRAL)
+    # Neutral output to arm (use center of neutral band)
+    pi.set_PWM_dutycycle(gpio, PULSE_NEUTRAL_C)
 
 
 def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int):
@@ -113,14 +137,14 @@ def main():
     for g in ALL_GPIOS:
         setup_pwm_esc(pi, g)
 
-    # Debug: confirm PWM config (does NOT call get_servo_pulsewidth)
+    # Debug: confirm PWM config (PWM mode; do NOT call get_servo_pulsewidth)
     for g in ALL_GPIOS:
         print(
             f"GPIO {g}: pwm_freq={pi.get_PWM_frequency(g)}Hz "
             f"pwm_range={pi.get_PWM_range(g)} duty={pi.get_PWM_dutycycle(g)}"
         )
 
-    print(f"[sub_motors_400hz] Arming at neutral for {ARM_TIME_S:.1f}s ...")
+    print(f"[sub_motors_400hz] Arming at neutral (center={PULSE_NEUTRAL_C}us) for {ARM_TIME_S:.1f}s ...")
     time.sleep(ARM_TIME_S)
 
     # UDP socket
@@ -150,11 +174,9 @@ def main():
                             "m4": i16_to_pct(m4_i16),
                         }
                         last_rx = time.time()
-                        # fall through to apply outputs
                     else:
                         # Not our magic; try JSON below
                         raise ValueError("Not legacy magic")
-
                 else:
                     # Too small for legacy; try JSON
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
@@ -172,7 +194,7 @@ def main():
                 # ignore malformed packets
                 pass
 
-            # Failsafe
+            # Failsafe -> neutral band center
             if time.time() - last_rx > COMMAND_TIMEOUT_S:
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
@@ -185,9 +207,9 @@ def main():
             time.sleep(LOOP_SLEEP_S)
 
     finally:
-        # Neutral on exit
+        # Neutral on exit (center of neutral band)
         for g in ALL_GPIOS:
-            set_pulse_us(pi, g, PULSE_NEUTRAL)
+            set_pulse_us(pi, g, PULSE_NEUTRAL_C)
         time.sleep(0.5)
         pi.stop()
 
