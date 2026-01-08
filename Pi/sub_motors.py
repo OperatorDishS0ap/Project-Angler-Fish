@@ -58,7 +58,7 @@ def make_esc(gpio: int) -> Servo:
         gpio,
         min_pulse_width=PULSE_MIN / 1_000_000.0,
         max_pulse_width=PULSE_MAX / 1_000_000.0,
-        frame_width=0.02,  # 20ms (50Hz)
+        frame_width=0.0025,  # 20ms (50Hz)
     )
 
 
