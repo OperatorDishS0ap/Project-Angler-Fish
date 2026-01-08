@@ -5,7 +5,7 @@ import pigpio
 # =========================
 # CONFIG
 # =========================
-GPIO_ESC = 18        # Change if needed
+GPIO_ESC = 13        # Change if needed
 ESC_FREQ = 400       # Hz
 
 PULSE_NEUTRAL = 1500 # µs
@@ -51,7 +51,7 @@ try:
     while True:
         print("Forward")
         set_pulse(PULSE_FORWARD)
-        time.sleep(1.0)
+        time.sleep(3.0)
 
         print("Neutral")
         set_pulse(PULSE_NEUTRAL)
@@ -59,7 +59,7 @@ try:
 
         print("Reverse")
         set_pulse(PULSE_REVERSE)
-        time.sleep(1.0)
+        time.sleep(3.0)
 
         print("Neutral")
         set_pulse(PULSE_NEUTRAL)
