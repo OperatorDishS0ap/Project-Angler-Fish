@@ -4,7 +4,8 @@ import socket
 import struct
 import time
 
-import pigpio
+from gpiozero import Servo
+from gpiozero.pins.pigpio import PiGPIOFactory
 
 LISTEN_IP = "0.0.0.0"
 LISTEN_PORT = 9000
@@ -15,6 +16,7 @@ GPIO_M2 = 12  # Starboard Bow (Z)
 GPIO_M3 = 13  # Port Stern (Y)
 GPIO_M4 = 19  # Starboard Stern (Y)
 
+# ESC pulse settings (microseconds)
 PULSE_NEUTRAL = 1500
 PULSE_MIN = 1100
 PULSE_MAX = 1900
@@ -26,28 +28,63 @@ CMD_FMT = "<4sI4h"
 CMD_MAGIC = b"SUB1"
 CMD_SIZE = struct.calcsize(CMD_FMT)
 
+
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
-def pct_to_pulse(pct: float) -> int:
+
+def i16_to_pct(v_i16: int) -> float:
+    # -1000..+1000 => -100..+100
+    return clamp((float(v_i16) / 1000.0) * 100.0, -100.0, 100.0)
+
+
+def pct_to_us(pct: float) -> int:
     pct = clamp(pct, -100.0, 100.0)
     if pct >= 0:
         return int(PULSE_NEUTRAL + (PULSE_MAX - PULSE_NEUTRAL) * (pct / 100.0))
     else:
         return int(PULSE_NEUTRAL + (PULSE_NEUTRAL - PULSE_MIN) * (pct / 100.0))
 
-def i16_to_pct(v_i16: int) -> float:
-    # -1000..+1000 => -100..+100
-    return clamp((float(v_i16) / 1000.0) * 100.0, -100.0, 100.0)
+
+def us_to_servo_value(pulse_us: int, min_us: int, max_us: int) -> float:
+    """
+    gpiozero.Servo value is in [-1, +1] mapped across [min_us, max_us].
+    """
+    pulse_us = clamp(pulse_us, min_us, max_us)
+    span = (max_us - min_us)
+    if span <= 0:
+        return 0.0
+    return (2.0 * (pulse_us - min_us) / span) - 1.0
+
+
+def make_esc(gpio: int, factory: PiGPIOFactory) -> Servo:
+    # Servo expects pulse widths in *seconds*
+    return Servo(
+        gpio,
+        min_pulse_width=PULSE_MIN / 1_000_000.0,
+        max_pulse_width=PULSE_MAX / 1_000_000.0,
+        frame_width=0.02,  # 20ms (50Hz) typical for many ESCs
+        pin_factory=factory,
+    )
+
+
+def set_esc_percent(esc: Servo, pct: float):
+    pulse = pct_to_us(pct)
+    esc.value = us_to_servo_value(pulse, PULSE_MIN, PULSE_MAX)
+
 
 def main():
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise SystemExit("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
+    # Use gpiozero + pigpio backend for stable timing
+    factory = PiGPIOFactory()  # connects to local pigpiod (localhost:8888)
 
-    for gpio in [GPIO_M1, GPIO_M2, GPIO_M3, GPIO_M4]:
-        pi.set_mode(gpio, pigpio.OUTPUT)
-        pi.set_servo_pulsewidth(gpio, PULSE_NEUTRAL)
+    esc1 = make_esc(GPIO_M1, factory)
+    esc2 = make_esc(GPIO_M2, factory)
+    esc3 = make_esc(GPIO_M3, factory)
+    esc4 = make_esc(GPIO_M4, factory)
+
+    # Initialize to neutral
+    for esc in (esc1, esc2, esc3, esc4):
+        set_esc_percent(esc, 0.0)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((LISTEN_IP, LISTEN_PORT))
@@ -56,7 +93,7 @@ def main():
     last_rx = time.time()
     last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
-    print(f"[sub_motors] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
+    print(f"[sub_motors_gpiozero] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
 
     while True:
         try:
@@ -90,15 +127,17 @@ def main():
         except Exception:
             pass
 
+        # Timeout safety -> neutral
         if time.time() - last_rx > COMMAND_TIMEOUT_S:
             last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
-        pi.set_servo_pulsewidth(GPIO_M1, pct_to_pulse(last["m1"]))
-        pi.set_servo_pulsewidth(GPIO_M2, pct_to_pulse(last["m2"]))
-        pi.set_servo_pulsewidth(GPIO_M3, pct_to_pulse(last["m3"]))
-        pi.set_servo_pulsewidth(GPIO_M4, pct_to_pulse(last["m4"]))
+        set_esc_percent(esc1, last["m1"])
+        set_esc_percent(esc2, last["m2"])
+        set_esc_percent(esc3, last["m3"])
+        set_esc_percent(esc4, last["m4"])
 
         time.sleep(0.01)
+
 
 if __name__ == "__main__":
     main()
