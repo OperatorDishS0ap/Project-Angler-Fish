@@ -17,8 +17,8 @@ GPIO_M4 = 19  # Starboard Stern
 
 # ESC pulse widths (microseconds)
 PULSE_NEUTRAL = 1500
-PULSE_MIN = 1100
-PULSE_MAX = 1900
+PULSE_MIN = 1300
+PULSE_MAX = 1700
 
 COMMAND_TIMEOUT_S = 0.5
 
