@@ -28,6 +28,22 @@ Install git:
 ```
 sudo apt install -y git
 ```
+Install pigpio
+```
+sudo apt install -y python3-setuptools python3-full
+wget https://github.com/joan2937/pigpio/archive/refs/tags/v79.tar.gz
+tar zxf v79.tar.gz
+cd pigpio-79
+make
+sudo make install
+sudo ldconfig
+sudo systemctl daemon-reload
+sudo systemctl enable --now pigpiod
+```
+Execute to start pigpio:
+```
+sudo pigpiod
+```
 
 Add Files:
 ```
