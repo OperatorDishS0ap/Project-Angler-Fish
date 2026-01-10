@@ -38,7 +38,6 @@ make
 sudo make install
 sudo ldconfig
 sudo systemctl daemon-reload
-sudo systemctl enable --now pigpiod
 ```
 Execute to start pigpio:
 ```
