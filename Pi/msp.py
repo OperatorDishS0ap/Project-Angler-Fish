@@ -2,7 +2,7 @@ import serial
 import struct
 import time
 
-SERIAL_PORT = "/dev/ttyAMA0"   # or /dev/serial0
+SERIAL_PORT = "/dev/serial0"   # or /dev/serial0
 BAUD = 115200
 
 ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
