@@ -24,13 +24,18 @@ def msp_motor_command(m1, m2, m3, m4):
 
 # Example: spin motors independently
 while True:
+    print("neutral")
     msp_motor_command(1460, 1460, 1460, 1460)
     time.sleep(1)
+    print("M2")
     msp_motor_command(1460, 1350, 1460, 1460)
     time.sleep(1)
+    print("M3")
     msp_motor_command(1460, 1460, 1350, 1460)
     time.sleep(1)
+    print("M4")
     msp_motor_command(1460, 1460, 1460, 1350)
     time.sleep(1)
+    print("M1")
     msp_motor_command(1350, 1460, 1460, 1460)
     time.sleep(1)
