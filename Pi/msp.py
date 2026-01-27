@@ -26,3 +26,11 @@ def msp_motor_command(m1, m2, m3, m4):
 while True:
     msp_motor_command(1460, 1460, 1460, 1460)
     time.sleep(1)
+    msp_motor_command(1460, 1350, 1460, 1460)
+    time.sleep(1)
+    msp_motor_command(1460, 1460, 1350, 1460)
+    time.sleep(1)
+    msp_motor_command(1460, 1460, 1460, 1350)
+    time.sleep(1)
+    msp_motor_command(1250, 1460, 1460, 1460)
+    time.sleep(1)
