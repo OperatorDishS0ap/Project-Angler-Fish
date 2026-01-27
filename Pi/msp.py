@@ -32,5 +32,5 @@ while True:
     time.sleep(1)
     msp_motor_command(1460, 1460, 1460, 1350)
     time.sleep(1)
-    msp_motor_command(1250, 1460, 1460, 1460)
+    msp_motor_command(1350, 1460, 1460, 1460)
     time.sleep(1)
