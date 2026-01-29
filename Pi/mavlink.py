@@ -2,20 +2,34 @@ import time
 # Import mavutil
 from pymavlink import mavutil
 
-# Create the connection
-#  If using a companion computer
-#  the default connection is available
-#  at ip 192.168.2.1 and the port 14550
-# Note: The connection is done with 'udpin' and not 'udpout'.
-#  You can check in http:192.168.2.2:2770/mavproxy that the communication made for 14550
-#  uses a 'udpbcast' (client) and not 'udpin' (server).
-#  If you want to use QGroundControl in parallel with your python script,
-#  it's possible to add a new output port in http:192.168.2.2:2770/mavproxy as a new line.
-#  E.g: --out udpbcast:192.168.2.255:yourport
-master = mavutil.mavlink_connection('udpin:0.0.0.0:14550')
+def wait_conn():
+    """
+    Sends a ping to stabilish the UDP communication and awaits for a response
+    """
+    msg = None
+    while not msg:
+        master.mav.ping_send(
+            int(time.time() * 1e6), # Unix time in microseconds
+            0, # Ping number
+            0, # Request ping of all systems
+            0 # Request ping of all components
+        )
+        msg = master.recv_match()
+        time.sleep(0.5)
 
-# Make sure the connection is valid
-master.wait_heartbeat()
+# Create the connection
+#  Companion is already configured to allow script connections under the port 9000
+# Note: The connection is done with 'udpout' and not 'udpin'.
+#  You can check in http:192.168.1.2:2770/mavproxy that the communication made for 9000
+#  uses a 'udp' (server) and not 'udpout' (client).
+master = mavutil.mavlink_connection('udpout:0.0.0.0:9000')
+
+# Send a ping to start connection and wait for any reply.
+#  This function is necessary when using 'udpout',
+#  as described before, 'udpout' connects to 'udpin',
+#  and needs to send something to allow 'udpin' to start
+#  sending data.
+wait_conn()
 
 # Get some information !
 while True:
