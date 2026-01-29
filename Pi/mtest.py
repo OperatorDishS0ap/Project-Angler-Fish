@@ -18,7 +18,7 @@ MAV_CMD_DO_MOTOR_TEST = 209
 THROTTLE_TYPE_PWM = 1  # common: 1 = PWM (firmware-dependent)
 
 CONN = "/dev/serial0"
-BAUD = 115200
+BAUD = 57600
 
 MOTORS = 4
 TEST_PWM = 1600
