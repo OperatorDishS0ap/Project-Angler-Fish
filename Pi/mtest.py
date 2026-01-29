@@ -20,8 +20,8 @@ THROTTLE_TYPE_PWM = 1  # common: 1 = PWM (firmware-dependent)
 CONN = "/dev/serial0"
 BAUD = 57600
 
-MOTORS = 4
-TEST_PWM = 1600
+MOTORS = 8
+TEST_PWM = 1800
 NEUTRAL_PWM = 1500
 TEST_TIME_S = 1.0
 NEUTRAL_TIME_S = 0.3
