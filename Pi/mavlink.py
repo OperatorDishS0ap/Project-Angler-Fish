@@ -5,7 +5,6 @@ from pymavlink import mavutil
 # Need to provide the serial port and baudrate
 master = mavutil.mavlink_connection("/dev/serial0", baud=115200)
 
-# Restart the ArduSub board !
 master.wait_heartbeat()
 
 def set_rc_channel_pwm(channel_id, pwm=1500):
@@ -33,20 +32,6 @@ set_rc_channel_pwm(2, 1500)
 set_rc_channel_pwm(3, 1500)
 set_rc_channel_pwm(4, 1500)
 time.sleep(1)
-
-# Arm
-# master.arducopter_arm() or:
-master.mav.command_long_send(
-    master.target_system,
-    master.target_component,
-    mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-    0,
-    1, 0, 0, 0, 0, 0, 0)
-
-# wait until arming confirmed (can manually check with master.motors_armed())
-print("Waiting for the vehicle to arm")
-master.motors_armed_wait()
-print('Armed!')
 
 set_rc_channel_pwm(1, 1600)
 print("M1 On")
