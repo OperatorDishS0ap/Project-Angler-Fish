@@ -50,10 +50,10 @@ PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" ==
 PULSE_MIN = 800
 PULSE_MAX = 2100
 
-PULSE_NEUTRAL = 1500
+PULSE_NEUTRAL = 1460
 
 # "Creep zone" to avoid sending (neutral, 1600]
-AVOID_LO = 1500
+AVOID_LO = 1400
 AVOID_HI = 1600
 FORWARD_START = AVOID_HI + 1  # 1601
 
