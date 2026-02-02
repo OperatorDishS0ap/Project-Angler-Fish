@@ -53,8 +53,8 @@ PULSE_MAX = 2100
 PULSE_NEUTRAL = 1460
 
 # "Creep zone" to avoid sending (neutral, 1600]
-AVOID_LO = 1400
-AVOID_HI = 1600
+AVOID_LO = 1406
+AVOID_HI = 1514
 FORWARD_START = AVOID_HI + 1  # 1601
 
 ARM_TIME_S = 3.0
