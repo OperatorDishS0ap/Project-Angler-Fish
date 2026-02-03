@@ -155,13 +155,17 @@ def main():
     sending = True
     armed = False
 
+    # Initialize rt/lt so debug print never uses undefined variables before first loop update
+    rt = -1.0
+    lt = -1.0
+
     ch = [
         MID_US, MID_US, THR_NEUTRAL_US, MID_US,
         MIN_US, MID_US, MID_US, MID_US
     ]
 
     def apply_failsafe():
-        nonlocal failsafe, armed
+        nonlocal failsafe, armed, rt, lt
         if not failsafe:
             print("[FAILSAFE] Throttle neutral + disarm")
         failsafe = True
@@ -172,9 +176,10 @@ def main():
         ch[3] = MID_US
         ch[4] = MIN_US
 
-    apply_failsafe()
-    ppm.send(ch)
+        # ✅ Force immediate update so Betaflight sees disarm/neutral right away
+        ppm.send(ch)
 
+    apply_failsafe()  # this also sends once now
     print("[RUN] RT=Forward  LT=Reverse  A=ARM  START=Pause  BACK=Exit")
 
     try:
@@ -189,9 +194,16 @@ def main():
                         ch[4] = MAX_US if armed else MIN_US
                         print(f"[ARM] {'ON' if armed else 'OFF'}")
 
+                        # ✅ Force immediate update so AUX1 drops instantly on disarm
+                        ppm.send(ch)
+
                     elif e.button == BTN_START:
                         sending = not sending
                         print(f"[PPM] {'ENABLED' if sending else 'PAUSED'}")
+
+                        # Optional: push an immediate update when toggling state
+                        # (useful if you pause while armed/disarmed and want instant effect)
+                        ppm.send(ch)
 
                     elif e.button == BTN_BACK:
                         return
@@ -216,6 +228,10 @@ def main():
                 ch[2] = bidirectional_throttle(rt, lt)
 
                 ppm.send(ch)
+            else:
+                # Keep rt/lt updated for debug display even when paused/failsafe
+                rt = joy.get_axis(AXIS_RT)
+                lt = joy.get_axis(AXIS_LT)
 
             if now - last_debug >= DEBUG_PERIOD:
                 print(
@@ -226,6 +242,7 @@ def main():
                     f"THR={ch[2]} | "
                     f"{'ARMED' if armed else 'DISARMED'}"
                     f"{' FAILSAFE' if failsafe else ''}"
+                    f"{' PAUSED' if not sending else ''}"
                 )
                 last_debug = now
 
@@ -233,8 +250,7 @@ def main():
 
     finally:
         print("\n[EXIT] Neutral throttle, stop PPM")
-        apply_failsafe()
-        ppm.send(ch)
+        apply_failsafe()  # already sends
         time.sleep(0.2)
         ppm.stop()
         pi.stop()
