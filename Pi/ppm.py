@@ -2,10 +2,10 @@
 """
 ppmrx_xbox360_betaflight.py
 
-Raspberry Pi Zero "PPM receiver":
+Raspberry Pi Zero "PPM receiver" with terminal debug output:
 - Reads Xbox 360 controller via pygame (USB)
 - Outputs 8-channel PPM (CPPM) at 50 Hz using pigpio waveforms
-- Intended for Betaflight PPM RX input
+- Prints live control data to terminal for debugging (default 10 Hz)
 
 Default channel order:
 CH1 Roll
@@ -32,7 +32,7 @@ import pigpio
 # ----------------------------
 # PPM settings
 # ----------------------------
-PPM_GPIO = 18          # GPIO pin to output PPM (BCM numbering). GPIO18 is convenient.
+PPM_GPIO = 18          # GPIO pin to output PPM (BCM numbering)
 FRAME_HZ = 50
 FRAME_US = int(1_000_000 / FRAME_HZ)  # 20,000 us
 CHANNELS = 8
@@ -47,8 +47,12 @@ FAILSAFE_S = 0.6
 # Stick deadzone
 DEADZONE = 0.08
 
+# Debug print rate
+DEBUG_HZ = 10
+DEBUG_PERIOD = 1.0 / DEBUG_HZ
+
 # ----------------------------
-# Xbox 360 mappings (may vary; use the debug snippet below if needed)
+# Xbox 360 mappings (may vary; use the debug snippet to verify if needed)
 # ----------------------------
 AXIS_LX = 0
 AXIS_LY = 1
@@ -115,26 +119,22 @@ class PPMOut:
         # Clamp channels
         ch = [clamp(int(v), MIN_US, MAX_US) for v in ch_us_list]
 
-        # Total time used by channel slots:
-        # each slot is ch_us (includes PULSE_US high + (ch_us - PULSE_US) low)
         used_us = sum(ch)
-
-        # Sync gap to complete the frame length
         sync_us = FRAME_US - used_us
-        # Safety: ensure we always have a reasonable sync gap
+
+        # Ensure a reasonable sync gap; if channels consume too much time,
+        # enforce minimum sync (frame effectively becomes longer).
         if sync_us < 3000:
-            # If channels consume too much time, force a minimum sync,
-            # and effectively increase frame length (rare unless extreme settings).
             sync_us = 3000
 
         pulses = []
 
-        # Build pulses: for each channel -> HIGH for PULSE_US, LOW for (ch_us - PULSE_US)
+        # Each channel: HIGH PULSE_US then LOW remainder of slot
         for v in ch:
             pulses.append(pigpio.pulse(1 << self.gpio, 0, PULSE_US))
             pulses.append(pigpio.pulse(0, 1 << self.gpio, v - PULSE_US))
 
-        # Sync: just keep LOW for sync_us
+        # Sync: LOW for sync_us
         pulses.append(pigpio.pulse(0, 1 << self.gpio, sync_us))
 
         # Replace previous waveform
@@ -182,18 +182,24 @@ def main():
 
     ppm = PPMOut(pi, PPM_GPIO)
     print(f"[OK] PPM output on GPIO{PPM_GPIO} @ {FRAME_HZ} Hz, {CHANNELS} channels")
+    print("[RUN] A=toggle ARM (CH5), START=pause/resume, BACK=exit. Ctrl+C to quit.")
 
     # State
     last_event_t = time.monotonic()
+    last_debug_t = 0.0
+    failsafe_active = False
+
     sending_enabled = True
     armed = False
 
-    # Channels default:
-    # CH1 roll, CH2 pitch, CH3 thr, CH4 yaw, CH5 aux1 arm, CH6..CH8 mid
+    # Channels: CH1 roll, CH2 pitch, CH3 thr, CH4 yaw, CH5 aux1 arm, CH6..CH8 mid
     ch = [MID_US, MID_US, MIN_US, MID_US, MIN_US, MID_US, MID_US, MID_US]
 
     def apply_failsafe():
-        nonlocal armed, ch
+        nonlocal armed, ch, failsafe_active
+        if not failsafe_active:
+            print("[FAILSAFE] Activated → throttle low, disarm")
+        failsafe_active = True
         armed = False
         ch[0] = MID_US
         ch[1] = MID_US
@@ -201,15 +207,13 @@ def main():
         ch[3] = MID_US
         ch[4] = MIN_US  # AUX1 disarm
 
-    # Start in failsafe-safe state
+    # Start safe
     apply_failsafe()
     ppm.send_frame_repeat(ch)
 
-    print("[RUN] A=toggle ARM (CH5), START=pause/resume, BACK=exit. Ctrl+C to quit.")
-
     try:
         while running:
-            # Events update joystick state
+            # Process events
             for event in pygame.event.get():
                 if event.type in (pygame.JOYAXISMOTION, pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP):
                     last_event_t = time.monotonic()
@@ -218,7 +222,7 @@ def main():
                     if event.button == BTN_A:
                         armed = not armed
                         ch[4] = MAX_US if armed else MIN_US
-                        print(f"[ARM] {'ON' if armed else 'OFF'} (CH5={ch[4]})")
+                        print(f"[ARM] {'ON' if armed else 'OFF'} → CH5={ch[4]}")
 
                     elif event.button == BTN_START:
                         sending_enabled = not sending_enabled
@@ -226,14 +230,18 @@ def main():
 
                     elif event.button == BTN_BACK:
                         print("[EXIT] BACK pressed")
-                        break
+                        return
 
             now = time.monotonic()
+
+            # Failsafe if controller quiet
             if (now - last_event_t) > FAILSAFE_S:
                 apply_failsafe()
+            else:
+                failsafe_active = False
 
-            if sending_enabled:
-                # Read axes
+            if sending_enabled and not failsafe_active:
+                # Read axes (with deadzone)
                 lx = apply_deadzone(joy.get_axis(AXIS_LX))
                 ly = apply_deadzone(joy.get_axis(AXIS_LY))
                 rx = apply_deadzone(joy.get_axis(AXIS_RX))
@@ -247,11 +255,36 @@ def main():
                 t = throttle_from_rt(joy)
                 ch[2] = throttle_to_us(t)
 
-                # AUX1 arm already set by A toggle (ch[4])
-                # CH6..CH8 left at MID unless you add features
+                # CH5 already set by arm toggle, CH6..CH8 remain MID unless changed
 
                 # Update PPM waveform (rebuild + repeat)
                 ppm.send_frame_repeat(ch)
+
+            # Debug print at DEBUG_HZ
+            if now - last_debug_t >= DEBUG_PERIOD:
+                # Raw axis values (not deadzoned) so you can see noise
+                raw_lx = joy.get_axis(AXIS_LX)
+                raw_ly = joy.get_axis(AXIS_LY)
+                raw_rx = joy.get_axis(AXIS_RX)
+                raw_rt = joy.get_axis(AXIS_RT)
+
+                print(
+                    f"AXES  "
+                    f"LX={raw_lx: .2f} "
+                    f"LY={raw_ly: .2f} "
+                    f"RX={raw_rx: .2f} "
+                    f"RT={raw_rt: .2f} | "
+                    f"PPM  "
+                    f"R={ch[0]} "
+                    f"P={ch[1]} "
+                    f"T={ch[2]} "
+                    f"Y={ch[3]} "
+                    f"AUX1={ch[4]} | "
+                    f"{'ARMED' if armed else 'DISARMED'}"
+                    f"{' | FAILSAFE' if failsafe_active else ''}"
+                    f"{' | PAUSED' if not sending_enabled else ''}"
+                )
+                last_debug_t = now
 
             time.sleep(0.01)
 
