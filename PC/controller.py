@@ -71,7 +71,7 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn
     else:
         roll = 0.0
 
-    debug = False
+    debug = True
     if debug:
         print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f}")
         time.sleep(0.1)
