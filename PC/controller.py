@@ -28,81 +28,60 @@ def throttle_to_i16(v: float) -> int:
 # MOTOR MIXING (same behavior as your working example)
 # ==========================================================
 ROLL_MAX = 0.20
-VERT_MAX = 0.20
-ROT_MAX  = 0.20
+PITCH_MAX = 0.20
+YAW_MAX  = 0.20
 
 
-def compute_motors(lt_y: float, rt_x: float, triggers: float, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float]:
+def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, float]:
 
     pad_up, pad_right, pad_down, pad_left = pad
-    roll_flag = False
-    vert_flag = False
 
-    # Control M3/M4
+    # Control throttle
     if abs(triggers) > 0.05:
-        surge = clamp(triggers, -1.0, 1.0)
-        m3 = surge
-        m4 = surge
-    elif pad_left > 0 and abs(triggers) < 0.05:
-        m3 = -ROT_MAX
-        m4 = ROT_MAX
-    elif pad_right > 0 and abs(triggers) < 0.05:
-        m3 = ROT_MAX
-        m4 = -ROT_MAX
-    else:
-        m3 = 0.0
-        m4 = 0.0
+        throttle = clamp(triggers, -1.0, 1.0)
     
-    # Control M1/M2
-    if roll_flag == False:
-        if abs(lt_y) > 0.05:
-            vert_flag = True
-            roll_flag = False
-            m1, m2 = -lt_y*VERT_MAX, -lt_y*VERT_MAX
-        elif pad_up > 0 and abs(lt_y) < 0.05:
-            vert_flag = True
-            roll_flag = False
-            m1 = VERT_MAX
-            m2 = VERT_MAX
-        elif pad_down > 0 and abs(lt_y) < 0.05:
-            vert_flag = True
-            roll_flag = False
-            m1 = -VERT_MAX
-            m2 = -VERT_MAX
-        else:
-            vert_flag = False
-            roll_flag = False
-            m1 = 0.0
-            m2 = 0.0
+    # Control yaw
+    if abs(rt_x) > 0.05:
+        yaw = clamp(rt_x, -1.0, 1.0)
+    elif pad_left > 0 and abs(rt_x) < 0.05:
+        yaw = YAW_MAX
+    elif pad_right > 0 and abs(rt_x) < 0.05:
+        yaw = -YAW_MAX
+    else:
+        yaw = 0.0
 
-    if vert_flag == False:
-        if abs(rt_x) > 0.05:
-            roll_flag = True
-            vert_flag = False
-            m1 = rt_x*ROLL_MAX
-            m2 = -rt_x*ROLL_MAX
-        else:
-            roll_flag = False
-            vert_flag = False
-            m1 = 0.0
-            m2 = 0.0
+    #Control pitch
+    if abs(lt_y) > 0.05:
+        pitch = clamp(lt_y, -1.0, 1.0)
+    elif pad_up > 0 and abs(lt_y) < 0.05:
+        pitch = PITCH_MAX
+    elif pad_down > 0 and abs(lt_y) < 0.05:
+        pitch = -PITCH_MAX
+    else:
+        pitch = 0.0
+
+    #Control roll
+    if abs(lt_x) > 0.05:
+        roll = clamp(lt_x, -1.0, 1.0)
+    else:
+        roll = 0.0
 
     debug = False
     if debug:
-        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> m1={m1:.2f} m2={m2:.2f} m3={m3:.2f} m4={m4:.2f}")
+        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f}")
         time.sleep(0.1)
 
-    return tuple(clamp(v, -1.0, 1.0) for v in (m1, m2, m3, m4))
+    return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll))
 
 @dataclass
 class MotorCommand:
-    m1: float = 0.0  # -1..1
-    m2: float = 0.0
-    m3: float = 0.0
-    m4: float = 0.0
+    throttle: float = 0.0  # -1..1
+    yaw: float = 0.0
+    pitch: float = 0.0
+    roll: float = 0.0
 
     def pct(self):
-        return (self.m1 * 100.0, self.m2 * 100.0, self.m3 * 100.0, self.m4 * 100.0)
+        return (self.throttle * 100.0, self.yaw * 100.0, self.pitch * 100.0, self.roll * 100.0)
 
 class MotorUdpSender:
     """Sends the legacy binary packet: <4s I 4h."""
@@ -140,10 +119,10 @@ class MotorUdpSender:
                 CMD_FMT,
                 CMD_MAGIC,
                 self._seq,
-                throttle_to_i16(cmd.m1),
-                throttle_to_i16(cmd.m2),
-                throttle_to_i16(cmd.m3),
-                throttle_to_i16(cmd.m4),
+                throttle_to_i16(cmd.throttle),
+                throttle_to_i16(cmd.yaw),
+                throttle_to_i16(cmd.pitch),
+                throttle_to_i16(cmd.roll),
             )
             try:
                 self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
@@ -173,8 +152,8 @@ class XboxControllerReader:
         triggers = self.controller.get_triggers()
         pad = self.controller.get_pad()
 
-        m1, m2, m3, m4 = compute_motors(lt_y, rt_x, triggers, pad)
-        self.latest_cmd = MotorCommand(m1=m1, m2=m2, m3=m3, m4=m4)
+        throttle, yaw, pitch, roll = compute_motors(lt_x, lt_y, rt_x, triggers, pad)
+        self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll)
 
         if self.debug and (time.time() - self._last_debug) > 1.0:
             self._last_debug = time.time()
