@@ -32,9 +32,14 @@ PITCH_MAX = 0.20
 YAW_MAX  = 0.20
 
 
-def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, float]:
+def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn: int, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, int, float]:
 
     pad_up, pad_right, pad_down, pad_left = pad
+
+    if a_btn > 0:
+        arm = 1
+    else:
+        arm = 0
 
     # Control throttle
     if abs(triggers) > 0.05:
@@ -71,7 +76,7 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: 
         print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f}")
         time.sleep(0.1)
 
-    return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll))
+    return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll, arm))
 
 @dataclass
 class MotorCommand:
@@ -123,6 +128,7 @@ class MotorUdpSender:
                 throttle_to_i16(cmd.yaw),
                 throttle_to_i16(cmd.pitch),
                 throttle_to_i16(cmd.roll),
+                throttle_to_i16(cmd.arm),
             )
             try:
                 self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
@@ -147,16 +153,18 @@ class XboxControllerReader:
     def poll(self) -> MotorCommand:
         pygame.event.pump()
 
+        pressed = self.controller.get_buttons()
         lt_x, lt_y = self.controller.get_left_stick()
         rt_x, _rt_y = self.controller.get_right_stick()
         triggers = self.controller.get_triggers()
+        a_btn = pressed[xbox360_controller.A]
         pad = self.controller.get_pad()
 
-        throttle, yaw, pitch, roll = compute_motors(lt_x, lt_y, rt_x, triggers, pad)
+        throttle, yaw, pitch, roll, arm = compute_motors(lt_x, lt_y, rt_x, triggers, a_btn, pad)
         self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll)
 
         if self.debug and (time.time() - self._last_debug) > 1.0:
             self._last_debug = time.time()
-            print(f"[DEBUG] lt=({lt_x:.2f},{lt_y:.2f}) rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> m={self.latest_cmd}")
+            print(f"[DEBUG] lt=({lt_x:.2f},{lt_y:.2f}) rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} arm={a_btn} -> m={self.latest_cmd}")
 
         return self.latest_cmd
