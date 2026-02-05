@@ -98,11 +98,12 @@ def main():
             if magic != CMD_MAGIC:
                 continue
 
-            throttle = max(0.0, min(1.0, t_i / 1000.0))
-            yaw = max(-1.0, min(1.0, y_i / 1000.0))
-            pitch = max(-1.0, min(1.0, p_i / 1000.0))
-            roll = max(-1.0, min(1.0, r_i / 1000.0))
-            arm = 1 if a_i > 0 else 0
+            throttle = max(-1.0, min(1.0, t_i / 1000.0))
+            yaw      = max(-1.0, min(1.0, y_i / 1000.0))
+            pitch    = max(-1.0, min(1.0, p_i / 1000.0))
+            roll     = max(-1.0, min(1.0, r_i / 1000.0))
+            arm      = 1 if a_i > 0 else 0
+
 
         except BlockingIOError:
             pass
