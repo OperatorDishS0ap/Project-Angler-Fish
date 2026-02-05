@@ -56,10 +56,10 @@ def build_crsf_packet(throttle, yaw, pitch, roll, arm):
     channels[1] = map_channel(norm_axis(pitch),    -1, 1)  # Pitch
     channels[2] = map_channel(norm_axis(throttle), -1, 1)  # Throttle
     channels[3] = map_channel(norm_axis(yaw),      -1, 1)  # Yaw
-    channels[4] = CRSF_MAX if arm else CRSF_MIN               # Arm switch
+    channels[4] = CRSF_MAX if arm else CRSF_MIN               # Arm (channel 5)
 
-    # AUX1 (channel 5) always neutral/zero for gating front motors
-    channels[5 - 1] = CRSF_MID  # iNav sees this as zero
+    # AUX2 (channel 6) always zero for front motor gating
+    channels[5] = CRSF_MID  # AUX2, iNav sees this as neutral
 
     payload = bytearray()
     bits = 0
@@ -81,6 +81,7 @@ def build_crsf_packet(throttle, yaw, pitch, roll, arm):
 
     frame.append(crc8(frame[2:]))
     return frame
+
 
 
 # =============================
