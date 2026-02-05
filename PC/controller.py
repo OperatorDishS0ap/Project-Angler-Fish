@@ -30,21 +30,29 @@ def throttle_to_i16(v: float) -> int:
 ROLL_MAX = 0.20
 PITCH_MAX = 0.20
 YAW_MAX  = 0.20
+ARM_FLAG = 0
 
 
 def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn: int, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, int, float]:
 
     pad_up, pad_right, pad_down, pad_left = pad
 
+    ARM_FLAG = 0
+    
     if a_btn > 0:
-        arm = 1
+        if ARM_FLAG < 1:
+            ARM_FLAG = 1
+        else:
+            ARM_FLAG = 0
+        arm = ARM_FLAG
     else:
-        arm = 0
+        arm = ARM_FLAG
 
     # Control throttle
     if abs(triggers) > 0.05:
         throttle = clamp(triggers, -1.0, 1.0)
-    
+    else:
+        throttle = 0
     # Control yaw
     if abs(rt_x) > 0.05:
         yaw = clamp(rt_x, -1.0, 1.0)
@@ -57,7 +65,7 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn
 
     #Control pitch
     if abs(lt_y) > 0.05:
-        pitch = clamp(lt_y, -1.0, 1.0)
+        pitch = clamp(-lt_y, -1.0, 1.0)
     elif pad_up > 0 and abs(lt_y) < 0.05:
         pitch = PITCH_MAX
     elif pad_down > 0 and abs(lt_y) < 0.05:
@@ -73,7 +81,7 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn
 
     debug = True
     if debug:
-        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f}")
+        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f} arm={arm}")
         time.sleep(0.1)
 
     return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll, arm))
@@ -128,7 +136,6 @@ class MotorUdpSender:
                 throttle_to_i16(cmd.yaw),
                 throttle_to_i16(cmd.pitch),
                 throttle_to_i16(cmd.roll),
-                throttle_to_i16(cmd.arm),
             )
             try:
                 self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
@@ -161,7 +168,7 @@ class XboxControllerReader:
         pad = self.controller.get_pad()
 
         throttle, yaw, pitch, roll, arm = compute_motors(lt_x, lt_y, rt_x, triggers, a_btn, pad)
-        self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll)
+        self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll, arm=arm)
 
         if self.debug and (time.time() - self._last_debug) > 1.0:
             self._last_debug = time.time()

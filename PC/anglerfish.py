@@ -220,13 +220,13 @@ class AnglerFishApp(tk.Tk):
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
 
-        self.m1_var = tk.StringVar(value="M1: 0")
-        self.m2_var = tk.StringVar(value="M2: 0")
-        self.m3_var = tk.StringVar(value="M3: 0")
-        self.m4_var = tk.StringVar(value="M4: 0")
+        self.throttle_var = tk.StringVar(value="throttle: 0")
+        self.yaw_var = tk.StringVar(value="yaw: 0")
+        self.pitch_var = tk.StringVar(value="pitch: 0")
+        self.roll_var = tk.StringVar(value="roll: 0")
 
-        ttk.Label(side, text="Motors (%)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.m1_var, self.m2_var, self.m3_var, self.m4_var]:
+        ttk.Label(side, text="Vectoring", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
+        for v in [self.throttle_var, self.yaw_var, self.pitch_var, self.roll_var]:
             ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
@@ -317,11 +317,11 @@ class AnglerFishApp(tk.Tk):
             if self.controller and self.motor_sender:
                 cmd = self.controller.poll()
                 self.motor_sender.set_target(cmd)
-                m1p, m2p, m3p, m4p = cmd.pct()
-                self.m1_var.set(f"M1: {m1p:.0f}")
-                self.m2_var.set(f"M2: {m2p:.0f}")
-                self.m3_var.set(f"M3: {m3p:.0f}")
-                self.m4_var.set(f"M4: {m4p:.0f}")
+                throttlep, yawp, pitchp, rollp = cmd.pct()
+                self.throttle_var.set(f"throttle: {throttlep:.0f}")
+                self.yaw_var.set(f"yaw: {yawp:.0f}")
+                self.pitch_var.set(f"pitch: {pitchp:.0f}")
+                self.roll_var.set(f"roll: {rollp:.0f}")
             if self.start_time:
                 elapsed = int(time.time() - self.start_time)
                 mm, ss = divmod(elapsed, 60)
