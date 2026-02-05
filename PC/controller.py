@@ -14,7 +14,7 @@ pygame.init()
 # ==========================================================
 # MOTOR PACKET (legacy, matches your known-good script)
 # ==========================================================
-CMD_FMT = "<4sI4h"
+CMD_FMT = "<4sI5h"
 CMD_MAGIC = b"SUB1"
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -30,23 +30,12 @@ def throttle_to_i16(v: float) -> int:
 ROLL_MAX = 0.20
 PITCH_MAX = 0.20
 YAW_MAX  = 0.20
-ARM_FLAG = 0
+a_flag = False
 
 
-def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn: int, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, int, float]:
+def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, float]:
 
     pad_up, pad_right, pad_down, pad_left = pad
-
-    ARM_FLAG = 0
-    
-    if a_btn > 0:
-        if ARM_FLAG < 1:
-            ARM_FLAG = 1
-        else:
-            ARM_FLAG = 0
-        arm = ARM_FLAG
-    else:
-        arm = ARM_FLAG
 
     # Control throttle
     if abs(triggers) > 0.05:
@@ -79,12 +68,12 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, a_btn
     else:
         roll = 0.0
 
-    debug = True
+    debug = False
     if debug:
-        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f} arm={arm}")
+        print(f"[DEBUG] lt_y={lt_y:.2f} rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} -> throttle={throttle:.2f} yaw={yaw:.2f} pitch={pitch:.2f} roll={roll:.2f}")
         time.sleep(0.1)
 
-    return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll, arm))
+    return tuple(clamp(v, -1.0, 1.0) for v in (throttle, yaw, pitch, roll))
 
 @dataclass
 class MotorCommand:
@@ -92,9 +81,11 @@ class MotorCommand:
     yaw: float = 0.0
     pitch: float = 0.0
     roll: float = 0.0
+    a_flag: bool = False
 
     def pct(self):
-        return (self.throttle * 100.0, self.yaw * 100.0, self.pitch * 100.0, self.roll * 100.0)
+        a_flag_pct = 100.0 if self.a_flag else 0.0
+        return (self.throttle * 100.0, self.yaw * 100.0, self.pitch * 100.0, self.roll * 100.0, a_flag_pct)
 
 class MotorUdpSender:
     """Sends the legacy binary packet: <4s I 4h."""
@@ -116,7 +107,7 @@ class MotorUdpSender:
     def stop(self) -> None:
         self._stop.set()
         try:
-            pkt = struct.pack(CMD_FMT, CMD_MAGIC, self._seq, 0, 0, 0, 0)
+            pkt = struct.pack(CMD_FMT, CMD_MAGIC, self._seq, 0, 0, 0, 0, 0)
             self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
         except Exception:
             pass
@@ -128,6 +119,7 @@ class MotorUdpSender:
         dt = 1.0 / max(1.0, self.rate_hz)
         while not self._stop.is_set():
             cmd = self.latest_cmd
+            a_flag_val = 1000 if cmd.a_flag else 0
             pkt = struct.pack(
                 CMD_FMT,
                 CMD_MAGIC,
@@ -136,6 +128,7 @@ class MotorUdpSender:
                 throttle_to_i16(cmd.yaw),
                 throttle_to_i16(cmd.pitch),
                 throttle_to_i16(cmd.roll),
+                a_flag_val,
             )
             try:
                 self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
@@ -155,6 +148,7 @@ class XboxControllerReader:
         self.controller = xbox360_controller.Controller()
         self.debug = os.environ.get("ANGLERFISH_DEBUG_CONTROLLER", "0") == "1"
         self._last_debug = 0.0
+        self._a_btn_last_press_time = 0.0
         self.latest_cmd = MotorCommand()
 
     def poll(self) -> MotorCommand:
@@ -167,11 +161,19 @@ class XboxControllerReader:
         a_btn = pressed[xbox360_controller.A]
         pad = self.controller.get_pad()
 
-        throttle, yaw, pitch, roll, arm = compute_motors(lt_x, lt_y, rt_x, triggers, a_btn, pad)
-        self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll, arm=arm)
+        global a_flag
+        # Debounce: only allow toggle if 500ms has passed since last press
+        if a_btn:
+            current_time = time.time()
+            if current_time - self._a_btn_last_press_time > 0.5:
+                a_flag = not a_flag
+                self._a_btn_last_press_time = current_time
+
+        throttle, yaw, pitch, roll = compute_motors(lt_x, lt_y, rt_x, triggers, pad)
+        self.latest_cmd = MotorCommand(throttle=throttle, yaw=yaw, pitch=pitch, roll=roll, a_flag=a_flag)
 
         if self.debug and (time.time() - self._last_debug) > 1.0:
             self._last_debug = time.time()
-            print(f"[DEBUG] lt=({lt_x:.2f},{lt_y:.2f}) rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} arm={a_btn} -> m={self.latest_cmd}")
+            print(f"[DEBUG] lt=({lt_x:.2f},{lt_y:.2f}) rt_x={rt_x:.2f} trig={triggers:.2f} pad={pad} arm={a_flag} -> m={self.latest_cmd}")
 
         return self.latest_cmd

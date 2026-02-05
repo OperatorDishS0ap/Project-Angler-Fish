@@ -164,6 +164,8 @@ class AnglerFishApp(tk.Tk):
             try:
                 self.status1.set_connected(True, "Connected")
                 client = self._ssh_connect()
+                cmd = "sudo pigpiod"
+                self._ssh_run(client, cmd)
                 cmd = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
                 self._ssh_run(client, cmd)
                 client.close()
@@ -224,14 +226,28 @@ class AnglerFishApp(tk.Tk):
         self.yaw_var = tk.StringVar(value="yaw: 0")
         self.pitch_var = tk.StringVar(value="pitch: 0")
         self.roll_var = tk.StringVar(value="roll: 0")
+        self.a_flag_var = tk.StringVar(value="a_flag: 0")
 
         ttk.Label(side, text="Vectoring", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.throttle_var, self.yaw_var, self.pitch_var, self.roll_var]:
+        for v in [self.throttle_var, self.yaw_var, self.pitch_var, self.roll_var, self.a_flag_var]:
             ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(side, text="Tip: If video is black, verify /dev/video0 on the Pi and firewall rules on PC.",
-                  foreground="gray").pack(anchor="w", pady=6)
+
+        self.armed_var = tk.StringVar(value="DISARMED")
+        self.armed_label = tk.Label(side, textvariable=self.armed_var, font=("Segoe UI", 14, "bold"), 
+                                     relief="sunken", pady=8)
+        self.armed_label.pack(anchor="w", fill="x", pady=4)
+        self._update_armed_display(False)
+
+    def _update_armed_display(self, armed: bool):
+        """Update ARMED status indicator visual."""
+        if armed:
+            self.armed_var.set("ARMED")
+            self.armed_label.configure(bg="#00ff00", fg="black")
+        else:
+            self.armed_var.set("DISARMED")
+            self.armed_label.configure(bg="#ff6b6b", fg="white")
 
     def _show_page2(self):
         self.page1.pack_forget()
@@ -317,11 +333,13 @@ class AnglerFishApp(tk.Tk):
             if self.controller and self.motor_sender:
                 cmd = self.controller.poll()
                 self.motor_sender.set_target(cmd)
-                throttlep, yawp, pitchp, rollp = cmd.pct()
+                throttlep, yawp, pitchp, rollp, a_flagp = cmd.pct()
                 self.throttle_var.set(f"throttle: {throttlep:.0f}")
                 self.yaw_var.set(f"yaw: {yawp:.0f}")
                 self.pitch_var.set(f"pitch: {pitchp:.0f}")
                 self.roll_var.set(f"roll: {rollp:.0f}")
+                self.a_flag_var.set(f"a_flag: {a_flagp:.0f}")
+                self._update_armed_display(bool(cmd.a_flag))
             if self.start_time:
                 elapsed = int(time.time() - self.start_time)
                 mm, ss = divmod(elapsed, 60)
