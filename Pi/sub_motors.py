@@ -45,21 +45,14 @@ def norm_axis(v):
 # =============================
 # CRSF PACKET BUILDER
 # =============================
-# =============================
-# CRSF PACKET BUILDER (with AUX1 always zero)
-# =============================
 def build_crsf_packet(throttle, yaw, pitch, roll, arm):
     channels = [CRSF_MID] * 16
 
-    # Standard RC channels
-    channels[0] = map_channel(norm_axis(roll),     -1, 1)  # Roll
-    channels[1] = map_channel(norm_axis(pitch),    -1, 1)  # Pitch
-    channels[2] = map_channel(norm_axis(throttle), -1, 1)  # Throttle
-    channels[3] = map_channel(norm_axis(yaw),      -1, 1)  # Yaw
-    channels[4] = CRSF_MAX if arm else CRSF_MIN               # Arm (channel 5)
-
-    # AUX2 (channel 6) always zero for front motor gating
-    channels[5] = CRSF_MID  # AUX2, iNav sees this as neutral
+    channels[0] = map_channel(norm_axis(roll),  -1, 1)
+    channels[1] = map_channel(norm_axis(pitch), -1, 1)
+    channels[2] = map_channel(norm_axis(throttle), -1, 1)
+    channels[3] = map_channel(norm_axis(yaw),   -1, 1)
+    channels[4] = CRSF_MAX if arm else CRSF_MIN
 
     payload = bytearray()
     bits = 0
@@ -81,8 +74,6 @@ def build_crsf_packet(throttle, yaw, pitch, roll, arm):
 
     frame.append(crc8(frame[2:]))
     return frame
-
-
 
 # =============================
 # MAIN
