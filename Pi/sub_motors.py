@@ -1,138 +1,115 @@
+import socket
+import struct
 import serial
 import time
-import socket
-import json
 
-# ================= SERIAL (CRSF) =================
-SERIAL_PORT = "/dev/serial0"
-SERIAL_BAUD = 420000
-
-# ================= UDP (FROM controller.py) =================
-UDP_IP = "" # UDP IP for programs running on the same Pi
+# =============================
+# UDP CONFIG
+# =============================
 UDP_PORT = 9000
+CMD_FMT = "<4sI5h"
+CMD_MAGIC = b"SUB1"
 
+# =============================
+# CRSF CONFIG
+# =============================
+CRSF_ADDR_FLIGHT_CONTROLLER = 0xC8
+CRSF_TYPE_RC_CHANNELS_PACKED = 0x16
+CRSF_FRAME_SIZE = 24
+CRSF_BAUD = 420000
+CRSF_UART = "/dev/serial0"
 
-# ================= CRSF CONSTANTS =================
-CRSF_ADDR_FC = 0xC8
-CRSF_TYPE_RC_CHANNELS = 0x16
-
+# CRSF channel limits
 CRSF_MIN = 172
 CRSF_MID = 992
 CRSF_MAX = 1811
 
-DEADBAND = 0.05
-FAILSAFE_TIMEOUT = 0.25  # seconds
-
-# ================= CRC =================
-def crc8_dvb_s2(data):
+# =============================
+# HELPERS
+# =============================
+def crc8(data):
     crc = 0
     for b in data:
         crc ^= b
         for _ in range(8):
-            crc = ((crc << 1) ^ 0xD5) if (crc & 0x80) else (crc << 1)
+            crc = (crc << 1) ^ 0xD5 if (crc & 0x80) else (crc << 1)
             crc &= 0xFF
     return crc
 
-# ================= SCALING =================
-def scale_axis(x):
-    if abs(x) <= DEADBAND:
-        return CRSF_MID
-    x = max(-1.0, min(1.0, x))
-    if x > 0:
-        return int(CRSF_MID + x * (CRSF_MAX - CRSF_MID))
-    else:
-        return int(CRSF_MID + x * (CRSF_MID - CRSF_MIN))
+def map_channel(x, in_min, in_max):
+    return int((x - in_min) * (CRSF_MAX - CRSF_MIN) / (in_max - in_min) + CRSF_MIN)
 
-def scale_throttle(t):
-    t = max(0.0, min(1.0, t))
-    return int(CRSF_MIN + t * (CRSF_MAX - CRSF_MIN))
+def norm_axis(v):
+    return max(-1.0, min(1.0, v))
 
-def scale_arm(a):
-    return CRSF_MAX if a else CRSF_MIN
+# =============================
+# CRSF PACKET BUILDER
+# =============================
+def build_crsf_packet(throttle, yaw, pitch, roll, arm):
+    channels = [CRSF_MID] * 16
 
-# ================= CRSF PACKING =================
-def pack_channels(channels):
+    channels[0] = map_channel(norm_axis(roll),  -1, 1)
+    channels[1] = map_channel(norm_axis(pitch), -1, 1)
+    channels[2] = map_channel(norm_axis(throttle), 0, 1)
+    channels[3] = map_channel(norm_axis(yaw),   -1, 1)
+    channels[4] = CRSF_MAX if arm else CRSF_MIN
+
     payload = bytearray()
-    bitbuf = 0
-    bitcount = 0
+    bits = 0
+    bitlen = 0
 
-    for c in channels:
-        bitbuf |= (c & 0x7FF) << bitcount
-        bitcount += 11
-        while bitcount >= 8:
-            payload.append(bitbuf & 0xFF)
-            bitbuf >>= 8
-            bitcount -= 8
+    for ch in channels:
+        bits |= ch << bitlen
+        bitlen += 11
+        while bitlen >= 8:
+            payload.append(bits & 0xFF)
+            bits >>= 8
+            bitlen -= 8
 
-    return payload
-
-def build_rc_packet(channels):
-    payload = pack_channels(channels)
-    length = len(payload) + 2  # type + CRC
     frame = bytearray([
-        CRSF_ADDR_FC,
-        length,
-        CRSF_TYPE_RC_CHANNELS
-    ])
-    frame.extend(payload)
-    frame.append(crc8_dvb_s2(frame[2:]))
+        CRSF_ADDR_FLIGHT_CONTROLLER,
+        CRSF_FRAME_SIZE,
+        CRSF_TYPE_RC_CHANNELS_PACKED,
+    ]) + payload[:22]
+
+    frame.append(crc8(frame[2:]))
     return frame
 
-# ================= SETUP =================
-ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0)
+# =============================
+# MAIN
+# =============================
+def main():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", UDP_PORT))
+    sock.setblocking(False)
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
-sock.setblocking(False)
+    ser = serial.Serial(CRSF_UART, CRSF_BAUD, timeout=0)
 
-# Failsafe defaults
-yaw = pitch = roll = 0.0
-throttle = 0.0
-arm = 0
-last_rx = time.time()
+    throttle = yaw = pitch = roll = 0.0
+    arm = 0
 
-# 16 CRSF channels
-channels = [CRSF_MID] * 16
-channels[2] = CRSF_MIN  # throttle low
+    print("[sub_motors] Listening on UDP port", UDP_PORT)
 
-print("[sub_motors] CRSF sender running")
-
-# ================= MAIN LOOP =================
-try:
     while True:
-        # ---- Receive from controller.py ----
         try:
             data, _ = sock.recvfrom(1024)
-            cmd = json.loads(data.decode())
+            magic, seq, t_i, y_i, p_i, r_i, a_i = struct.unpack(CMD_FMT, data)
 
-            yaw = cmd["yaw"]
-            pitch = cmd["pitch"]
-            roll = cmd["roll"]
-            throttle = cmd["throttle"]
-            arm = cmd["arm"]
+            if magic != CMD_MAGIC:
+                continue
 
-            last_rx = time.time()
+            throttle = max(0.0, min(1.0, t_i / 1000.0))
+            yaw = max(-1.0, min(1.0, y_i / 1000.0))
+            pitch = max(-1.0, min(1.0, p_i / 1000.0))
+            roll = max(-1.0, min(1.0, r_i / 1000.0))
+            arm = 1 if a_i > 0 else 0
 
         except BlockingIOError:
             pass
 
-        # ---- FAILSAFE ----
-        if time.time() - last_rx > FAILSAFE_TIMEOUT:
-            arm = 0
-            throttle = 0.0
+        pkt = build_crsf_packet(throttle, yaw, pitch, roll, arm)
+        ser.write(pkt)
+        time.sleep(0.01)  # ~100 Hz
 
-        # ---- Channel mapping (AETR1234) ----
-        channels[0] = scale_axis(roll)
-        channels[1] = scale_axis(pitch)
-        channels[2] = scale_throttle(throttle)
-        channels[3] = scale_axis(yaw)
-        channels[4] = scale_arm(arm)
-
-        # ---- Send CRSF ----
-        ser.write(build_rc_packet(channels))
-        time.sleep(0.01)  # 100 Hz
-
-except KeyboardInterrupt:
-    print("\n[sub_motors] Stopping")
-finally:
-    ser.close()
+if __name__ == "__main__":
+    main()
