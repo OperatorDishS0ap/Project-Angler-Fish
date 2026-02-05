@@ -8,8 +8,9 @@ SERIAL_PORT = "/dev/serial0"
 SERIAL_BAUD = 420000
 
 # ================= UDP (FROM controller.py) =================
-UDP_IP = "127.0.0.1" # UDP IP for programs running on the same Pi
-UDP_PORT = 5005
+UDP_IP = "" # UDP IP for programs running on the same Pi
+UDP_PORT = 9000
+
 
 # ================= CRSF CONSTANTS =================
 CRSF_ADDR_FC = 0xC8
