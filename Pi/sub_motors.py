@@ -1,227 +1,138 @@
-#!/usr/bin/env python3
-"""
-sub_motors_400hz_pigpio.py
-
-UDP-controlled 4x ESC output at 400 Hz using pigpio *PWM mode*
-(scope should show ~400 Hz, period ~2.5 ms).
-
-- Supports legacy binary packets: "<4sI4h" with magic b"SUB1"
-- Supports JSON fallback: {"m1":..,"m2":..,"m3":..,"m4":..}
-- Failsafe: if no command for COMMAND_TIMEOUT_S -> all motors neutral (1500us)
-
-Calibration (per your measurement):
-- Valid pulse range: 800..2100 us
-- Neutral is exactly 1500 us
-- Avoid sending any pulse in (1500, 1600] (creep zone)
-  * Reverse uses <=1500 (down toward 800)
-  * Forward uses >=1601 (up toward 2100)
-"""
-
-import json
-import socket
-import struct
+import serial
 import time
+import socket
+import json
 
-import pigpio
+# ================= SERIAL (CRSF) =================
+SERIAL_PORT = "/dev/serial0"
+SERIAL_BAUD = 420000
 
-# -------------------------
-# NETWORK
-# -------------------------
-LISTEN_IP = "0.0.0.0"
-LISTEN_PORT = 9000
-SOCK_TIMEOUT_S = 0.2
-
-# -------------------------
-# GPIO MAP
-# -------------------------
-GPIO_M1 = 18
-GPIO_M2 = 12
-GPIO_M3 = 13
-GPIO_M4 = 19
-ALL_GPIOS = (GPIO_M1, GPIO_M2, GPIO_M3, GPIO_M4)
-
-# -------------------------
-# ESC / PWM SETTINGS
-# -------------------------
-ESC_FREQ_HZ = 400
-PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
-PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
-
-PULSE_MIN = 1000
-PULSE_MAX = 2000
-
-PULSE_NEUTRAL = 1460
-
-# "Creep zone" to avoid sending (neutral, 1600]
-AVOID_LO = 1406
-AVOID_HI = 1514
-FORWARD_START = AVOID_HI + 1  # 1601
-
-ARM_TIME_S = 3.0
-COMMAND_TIMEOUT_S = 0.5
-LOOP_SLEEP_S = 0.005
-
-# Small command deadband: treat tiny commands as neutral
-PCT_DEADBAND = 2.0  # percent
-
-# -------------------------
-# LEGACY BINARY PROTOCOL
-# -------------------------
-CMD_FMT = "<4sI4h"
-CMD_MAGIC = b"SUB1"
-CMD_SIZE = struct.calcsize(CMD_FMT)
+# ================= UDP (FROM controller.py) =================
+UDP_IP = "" # UDP IP for programs running on the same Pi
+UDP_PORT = 9000
 
 
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
+# ================= CRSF CONSTANTS =================
+CRSF_ADDR_FC = 0xC8
+CRSF_TYPE_RC_CHANNELS = 0x16
 
+CRSF_MIN = 172
+CRSF_MID = 992
+CRSF_MAX = 1811
 
-def i16_to_pct(v_i16: int) -> float:
-    # -1000..+1000 => -100..+100
-    return clamp((float(v_i16) / 1000.0) * 100.0, -100.0, 100.0)
+DEADBAND = 0.05
+FAILSAFE_TIMEOUT = 0.25  # seconds
 
+# ================= CRC =================
+def crc8_dvb_s2(data):
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0xD5) if (crc & 0x80) else (crc << 1)
+            crc &= 0xFF
+    return crc
 
-def pct_to_pulse_us(pct: float) -> int:
-    """
-    Map -100..+100% to pulse widths with:
-      - neutral exactly 1500us
-      - reverse: 1500 -> 800 (<=1500)
-      - forward: 1601 -> 2100 (never send 1501..1600)
+# ================= SCALING =================
+def scale_axis(x):
+    if abs(x) <= DEADBAND:
+        return CRSF_MID
+    x = max(-1.0, min(1.0, x))
+    if x > 0:
+        return int(CRSF_MID + x * (CRSF_MAX - CRSF_MID))
+    else:
+        return int(CRSF_MID + x * (CRSF_MID - CRSF_MIN))
 
-    pct in (-deadband..+deadband) -> 1500us.
-    """
-    pct = clamp(pct, -100.0, 100.0)
+def scale_throttle(t):
+    t = max(0.0, min(1.0, t))
+    return int(CRSF_MIN + t * (CRSF_MAX - CRSF_MIN))
 
-    if abs(pct) <= PCT_DEADBAND:
-        return PULSE_NEUTRAL
+def scale_arm(a):
+    return CRSF_MAX if a else CRSF_MIN
 
-    if pct < 0:
-        # Reverse: -100 => 800, 0 => 1500
-        # Linear map: pulse = 1500 + (1500-800)*(pct/100)
-        return int(PULSE_NEUTRAL + (PULSE_NEUTRAL - PULSE_MIN) * (pct / 100.0))
+# ================= CRSF PACKING =================
+def pack_channels(channels):
+    payload = bytearray()
+    bitbuf = 0
+    bitcount = 0
 
-    # Forward: +0 => 1601, +100 => 2100
-    # Linear map: pulse = 1601 + (2100-1601)*(pct/100)
-    return int(FORWARD_START + (PULSE_MAX - FORWARD_START) * (pct / 100.0))
+    for c in channels:
+        bitbuf |= (c & 0x7FF) << bitcount
+        bitcount += 11
+        while bitcount >= 8:
+            payload.append(bitbuf & 0xFF)
+            bitbuf >>= 8
+            bitcount -= 8
 
+    return payload
 
-def setup_pwm_esc(pi: pigpio.pi, gpio: int):
-    """
-    Configure this GPIO for 400 Hz PWM where dutycycle units == microseconds.
-    """
-    pi.set_mode(gpio, pigpio.OUTPUT)
+def build_rc_packet(channels):
+    payload = pack_channels(channels)
+    length = len(payload) + 2  # type + CRC
+    frame = bytearray([
+        CRSF_ADDR_FC,
+        length,
+        CRSF_TYPE_RC_CHANNELS
+    ])
+    frame.extend(payload)
+    frame.append(crc8_dvb_s2(frame[2:]))
+    return frame
 
-    # Ensure servo mode is off (servo mode is ~50Hz)
-    pi.set_servo_pulsewidth(gpio, 0)
+# ================= SETUP =================
+ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0)
 
-    # Configure PWM
-    pi.set_PWM_frequency(gpio, ESC_FREQ_HZ)
-    pi.set_PWM_range(gpio, PWM_RANGE)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind((UDP_IP, UDP_PORT))
+sock.setblocking(False)
 
-    # Neutral output to arm
-    pi.set_PWM_dutycycle(gpio, PULSE_NEUTRAL)
+# Failsafe defaults
+yaw = pitch = roll = 0.0
+throttle = 0.0
+arm = 0
+last_rx = time.time()
 
+# 16 CRSF channels
+channels = [CRSF_MID] * 16
+channels[2] = CRSF_MIN  # throttle low
 
-def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int):
-    """
-    In this configuration, dutycycle == pulse width in microseconds.
-    Enforces:
-      - clamp to [800..2100]
-      - snap any 1501..1600 to 1500 (avoid creep zone)
-    """
-    pulse_us = int(pulse_us)
+print("[sub_motors] CRSF sender running")
 
-    # Avoid creep zone (1501..1600)
-    if AVOID_LO < pulse_us <= AVOID_HI:
-        pulse_us = PULSE_NEUTRAL
+# ================= MAIN LOOP =================
+try:
+    while True:
+        # ---- Receive from controller.py ----
+        try:
+            data, _ = sock.recvfrom(1024)
+            cmd = json.loads(data.decode())
 
-    pulse_us = clamp(pulse_us, PULSE_MIN, PULSE_MAX)
-    pi.set_PWM_dutycycle(gpio, pulse_us)
+            yaw = cmd["yaw"]
+            pitch = cmd["pitch"]
+            roll = cmd["roll"]
+            throttle = cmd["throttle"]
+            arm = cmd["arm"]
 
+            last_rx = time.time()
 
-def main():
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise SystemExit("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
+        except BlockingIOError:
+            pass
 
-    # Setup all ESC outputs
-    for g in ALL_GPIOS:
-        setup_pwm_esc(pi, g)
+        # ---- FAILSAFE ----
+        if time.time() - last_rx > FAILSAFE_TIMEOUT:
+            arm = 0
+            throttle = 0.0
 
-    # Debug: confirm PWM config (PWM mode; do NOT call get_servo_pulsewidth)
-    for g in ALL_GPIOS:
-        print(
-            f"GPIO {g}: pwm_freq={pi.get_PWM_frequency(g)}Hz "
-            f"pwm_range={pi.get_PWM_range(g)} duty={pi.get_PWM_dutycycle(g)}"
-        )
+        # ---- Channel mapping (AETR1234) ----
+        channels[0] = scale_axis(roll)
+        channels[1] = scale_axis(pitch)
+        channels[2] = scale_throttle(throttle)
+        channels[3] = scale_axis(yaw)
+        channels[4] = scale_arm(arm)
 
-    print(f"[sub_motors_400hz] Arming at neutral ({PULSE_NEUTRAL}us) for {ARM_TIME_S:.1f}s ...")
-    time.sleep(ARM_TIME_S)
+        # ---- Send CRSF ----
+        ser.write(build_rc_packet(channels))
+        time.sleep(0.01)  # 100 Hz
 
-    # UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((LISTEN_IP, LISTEN_PORT))
-    sock.settimeout(SOCK_TIMEOUT_S)
-
-    last_rx = time.time()
-    last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
-
-    print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
-
-    try:
-        while True:
-            # Receive
-            try:
-                data, _addr = sock.recvfrom(2048)
-
-                # 1) Legacy binary
-                if len(data) >= CMD_SIZE:
-                    magic, _seq, m1_i16, m2_i16, m3_i16, m4_i16 = struct.unpack(CMD_FMT, data[:CMD_SIZE])
-                    if magic == CMD_MAGIC:
-                        last = {
-                            "m1": i16_to_pct(m1_i16),
-                            "m2": i16_to_pct(m2_i16),
-                            "m3": i16_to_pct(m3_i16),
-                            "m4": i16_to_pct(m4_i16),
-                        }
-                        last_rx = time.time()
-                    else:
-                        raise ValueError("Not legacy magic")
-                else:
-                    # JSON fallback
-                    msg = json.loads(data.decode("utf-8", errors="ignore"))
-                    last = {
-                        "m1": float(msg.get("m1", last["m1"])),
-                        "m2": float(msg.get("m2", last["m2"])),
-                        "m3": float(msg.get("m3", last["m3"])),
-                        "m4": float(msg.get("m4", last["m4"])),
-                    }
-                    last_rx = time.time()
-
-            except socket.timeout:
-                pass
-            except Exception:
-                pass
-
-            # Failsafe -> neutral
-            if time.time() - last_rx > COMMAND_TIMEOUT_S:
-                last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
-
-            # Apply outputs (PWM @ 400Hz)
-            set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"]))
-            set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"]))
-            set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"]))
-            set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"]))
-
-            time.sleep(LOOP_SLEEP_S)
-
-    finally:
-        # Neutral on exit
-        for g in ALL_GPIOS:
-            set_pulse_us(pi, g, PULSE_NEUTRAL)
-        time.sleep(0.5)
-        pi.stop()
-
-
-if __name__ == "__main__":
-    main()
+except KeyboardInterrupt:
+    print("\n[sub_motors] Stopping")
+finally:
+    ser.close()
