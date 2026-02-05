@@ -50,7 +50,7 @@ def build_crsf_packet(throttle, yaw, pitch, roll, arm):
 
     channels[0] = map_channel(norm_axis(roll),  -1, 1)
     channels[1] = map_channel(norm_axis(pitch), -1, 1)
-    channels[2] = map_channel(norm_axis(throttle), 0, 1)
+    channels[2] = map_channel(norm_axis(throttle), -1, 1)
     channels[3] = map_channel(norm_axis(yaw),   -1, 1)
     channels[4] = CRSF_MAX if arm else CRSF_MIN
 
