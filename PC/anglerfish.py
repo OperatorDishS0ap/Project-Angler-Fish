@@ -222,14 +222,14 @@ class AnglerFishApp(tk.Tk):
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
 
-        self.throttle_var = tk.StringVar(value="throttle: 0")
-        self.yaw_var = tk.StringVar(value="yaw: 0")
-        self.pitch_var = tk.StringVar(value="pitch: 0")
-        self.roll_var = tk.StringVar(value="roll: 0")
+        self.m1_var = tk.StringVar(value="m1: 0")
+        self.m2_var = tk.StringVar(value="m2: 0")
+        self.m3_var = tk.StringVar(value="m3: 0")
+        self.m4_var = tk.StringVar(value="m4: 0")
         self.a_flag_var = tk.StringVar(value="a_flag: 0")
 
         ttk.Label(side, text="Vectoring", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.throttle_var, self.yaw_var, self.pitch_var, self.roll_var, self.a_flag_var]:
+        for v in [self.m1_var, self.m2_var, self.m3_var, self.m4_var, self.a_flag_var]:
             ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
@@ -334,10 +334,10 @@ class AnglerFishApp(tk.Tk):
                 cmd = self.controller.poll()
                 self.motor_sender.set_target(cmd)
                 throttlep, yawp, pitchp, rollp, a_flagp = cmd.pct()
-                self.throttle_var.set(f"throttle: {throttlep:.0f}")
-                self.yaw_var.set(f"yaw: {yawp:.0f}")
-                self.pitch_var.set(f"pitch: {pitchp:.0f}")
-                self.roll_var.set(f"roll: {rollp:.0f}")
+                self.m1_var.set(f"m1: {throttlep:.0f}")
+                self.m2_var.set(f"m2: {yawp:.0f}")
+                self.m3_var.set(f"m3: {pitchp:.0f}")
+                self.m4_var.set(f"m4: {rollp:.0f}")
                 self.a_flag_var.set(f"a_flag: {a_flagp:.0f}")
                 self._update_armed_display(bool(cmd.a_flag))
             if self.start_time:

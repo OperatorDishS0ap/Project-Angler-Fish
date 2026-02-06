@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import pygame
-import xbox360_contm4er  # local file in this folder (pygame-xbox360contm4er)
+import xbox360_controller  # local file in this folder (pygame-xbox360controller)
 
 pygame.init()
 
@@ -157,16 +157,16 @@ class MotorUdpSender:
                 pass
             time.sleep(dt)
 
-class XboxContm4erReader:
+class XboxControllerReader:
     """
-    Contm4er reader using pygame-xbox360contm4er (xbox360_contm4er.py).
+    Controller reader using pygame-xbox360controller (xbox360_controller.py).
     """
     def __init__(self):
         if pygame.joystick.get_count() == 0:
-            raise RuntimeError("No Xbox contm4er detected.")
+            raise RuntimeError("No Xbox controller detected.")
 
-        self.contm4er = xbox360_contm4er.Contm4er()
-        self.debug = os.environ.get("ANGLERFISH_DEBUG_CONTm4ER", "0") == "1"
+        self.controller = xbox360_controller.Controller()
+        self.debug = os.environ.get("ANGLERFISH_DEBUG_CONTROLLER", "0") == "1"
         self._last_debug = 0.0
         self._a_btn_last_press_time = 0.0
         self.latest_cmd = MotorCommand()
@@ -174,12 +174,12 @@ class XboxContm4erReader:
     def poll(self) -> MotorCommand:
         pygame.event.pump()
 
-        pressed = self.contm4er.get_buttons()
-        lt_x, lt_y = self.contm4er.get_left_stick()
-        rt_x, _rt_y = self.contm4er.get_right_stick()
-        triggers = self.contm4er.get_triggers()
-        a_btn = pressed[xbox360_contm4er.A]
-        pad = self.contm4er.get_pad()
+        pressed = self.controller.get_buttons()
+        lt_x, lt_y = self.controller.get_left_stick()
+        rt_x, _rt_y = self.controller.get_right_stick()
+        triggers = self.controller.get_triggers()
+        a_btn = pressed[xbox360_controller.A]
+        pad = self.controller.get_pad()
 
         global a_flag
         # Debounce: only allow toggle if 500ms has passed since last press
