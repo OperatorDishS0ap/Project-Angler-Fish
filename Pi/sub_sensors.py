@@ -38,6 +38,10 @@ def main():
         temp_pi = read_pi_temp_c()
         pressure, temp_env, depth = bar30()
 
+        Debug = True
+        if Debug:
+            print(f"Pressure: {pressure:.2f} psi, Temp (Pi): {temp_pi:.2f} C, Temp (Env): {temp_env:.2f} C, Depth: {depth:.3f} m")
+
         msg = {
             "ts": time.time(),
             "battery": 12.0 + 0.2 * random.random(),
