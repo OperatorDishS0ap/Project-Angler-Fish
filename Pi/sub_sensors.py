@@ -36,7 +36,8 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while True:
         temp_pi = read_pi_temp_c()
-        pressure, temp_env, depth = bar30()
+        if sensor.read():
+            pressure, temp_env, depth = bar30()
 
         Debug = True
         if Debug:
