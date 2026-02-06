@@ -4,6 +4,16 @@ import os
 import random
 import socket
 import time
+import ms5837
+
+sensor = ms5837.MS5837_30BA()  
+
+if not sensor.init():
+    print("Sensor could not be initialized")
+    exit(1)
+if not sensor.read():
+    print("Sensor read failed!")
+    exit(1)
 
 PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # set to your Windows ethernet IP
 PC_PORT = 9100
@@ -16,17 +26,25 @@ def read_pi_temp_c() -> float:
     except Exception:
         return 0.0
 
+def bar30():
+    pressure = sensor.pressure(ms5837.UNITS_psi)
+    temperature = sensor.temperature(ms5837.UNITS_Centigrade)
+    depth = sensor.depth()
+    return pressure, temperature, depth
+
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while True:
         temp_pi = read_pi_temp_c()
+        pressure, temp_env, depth = bar30()
+
         msg = {
             "ts": time.time(),
             "battery": 12.0 + 0.2 * random.random(),
-            "depth": 0.0 + 0.1 * random.random(),
-            "pressure": 1.0 + 0.05 * random.random(),
+            "depth": depth,
+            "pressure": pressure,
             "temp_pi": temp_pi,
-            "temp_env": temp_pi - 3.0,
+            "temp_env": temp_env,
         }
         try:
             sock.sendto(json.dumps(msg).encode("utf-8"), (PC_IP, PC_PORT))
