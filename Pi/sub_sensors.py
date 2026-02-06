@@ -6,7 +6,7 @@ import socket
 import time
 import ms5837
 
-sensor = ms5837.MS5837_30BA()  
+sensor = ms5837.MS5837_30BA(0)  
 
 if not sensor.init():
     print("Sensor could not be initialized")
