@@ -27,9 +27,9 @@ def m1_to_i16(v: float) -> int:
 # ==========================================================
 # MOTOR MIXING (same behavior as your working example)
 # ==========================================================
-ROLL_MAX = 0.20
-PITCH_MAX = 0.20
-YAW_MAX  = 0.20
+ROLL_MAX = 0.3
+PITCH_MAX = 0.3
+YAW_MAX  = 0.3
 a_flag = False
 
 
@@ -139,15 +139,22 @@ class MotorUdpSender:
         dt = 1.0 / max(1.0, self.rate_hz)
         while not self._stop.is_set():
             cmd = self.latest_cmd
+
+            # If we're disarmed, force all motor outputs to zero.
+            if not cmd.a_flag:
+                m1 = m2 = m3 = m4 = 0.0
+            else:
+                m1, m2, m3, m4 = cmd.m1, cmd.m2, cmd.m3, cmd.m4
+
             a_flag_val = 1000 if cmd.a_flag else 0
             pkt = struct.pack(
                 CMD_FMT,
                 CMD_MAGIC,
                 self._seq,
-                m1_to_i16(cmd.m1),
-                m1_to_i16(cmd.m2),
-                m1_to_i16(cmd.m3),
-                m1_to_i16(cmd.m4),
+                m1_to_i16(m1),
+                m1_to_i16(m2),
+                m1_to_i16(m3),
+                m1_to_i16(m4),
                 a_flag_val,
             )
             try:
