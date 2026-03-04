@@ -12,6 +12,12 @@ class Telemetry:
     pressure: float = 0.0
     temp_pi: float = 0.0
     temp_env: float = 0.0
+    temp_enclosure: float = 0.0
+    pitch: float = 0.0
+    roll: float = 0.0
+    yaw_rate: float = 0.0
+    angular_vel: float = 0.0
+    acceleration: float = 0.0
 
 
 class SensorUdpReceiver:
@@ -45,6 +51,12 @@ class SensorUdpReceiver:
                     pressure=float(msg.get("pressure", self.latest.pressure)),
                     temp_pi=float(msg.get("temp_pi", self.latest.temp_pi)),
                     temp_env=float(msg.get("temp_env", self.latest.temp_env)),
+                    temp_enclosure=float(msg.get("temp_enclosure", self.latest.temp_enclosure)),
+                    pitch=float(msg.get("pitch", self.latest.pitch)),
+                    roll=float(msg.get("roll", self.latest.roll)),
+                    yaw_rate=float(msg.get("yaw_rate", self.latest.yaw_rate)),
+                    angular_vel=float(msg.get("angular_vel", self.latest.angular_vel)),
+                    acceleration=float(msg.get("acceleration", self.latest.acceleration)),
                 )
             except socket.timeout:
                 continue
