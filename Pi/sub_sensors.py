@@ -41,10 +41,10 @@ def calculate_pitch_roll_yaw(acc, gyro):
     gx, gy, gz = gyro['x'], gyro['y'], gyro['z']
     
     # Calculate pitch and roll from accelerometer
-    # Pitch: rotation around Y axis
-    pitch = math.atan2(ax, math.sqrt(ay**2 + az**2)) * 180 / math.pi
-    # Roll: rotation around X axis
-    roll = math.atan2(ay, math.sqrt(ax**2 + az**2)) * 180 / math.pi
+    # Pitch: rotation around Y axis (swapped due to non-standard IMU mounting)
+    pitch = math.atan2(ay, math.sqrt(ax**2 + az**2)) * 180 / math.pi
+    # Roll: rotation around X axis (swapped due to non-standard IMU mounting)
+    roll = math.atan2(ax, math.sqrt(ay**2 + az**2)) * 180 / math.pi
     
     # Angular velocity (gyro readings in deg/s)
     angular_vel = math.sqrt(gx**2 + gy**2 + gz**2)
