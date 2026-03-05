@@ -172,6 +172,8 @@ class XboxControllerReader:
         # Reinitialize pygame joystick module to clear cached joystick IDs
         pygame.joystick.quit()
         pygame.joystick.init()
+        # also reset our controller ID counter so we always start at 0
+        Controller.id_num = 0
         
         if pygame.joystick.get_count() == 0:
             raise RuntimeError("No Xbox controller detected.")
@@ -189,6 +191,9 @@ class XboxControllerReader:
                 self.controller = None
         except Exception:
             pass
+        # reset static counter as controllers are gone
+        Controller.id_num = 0
+
 
     def poll(self) -> MotorCommand:
         pygame.event.pump()
