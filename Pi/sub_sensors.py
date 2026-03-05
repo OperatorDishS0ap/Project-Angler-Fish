@@ -64,7 +64,7 @@ def main():
         
         # Apply exponential decay to prevent drift
         # Time constant of ~5 seconds for decay
-        decay_factor = 0.97
+        decay_factor = 0.98
         speed *= decay_factor
         
         # Clamp speed to prevent unrealistic values
