@@ -172,8 +172,11 @@ class XboxControllerReader:
         # Reinitialize pygame joystick module to clear cached joystick IDs
         pygame.joystick.quit()
         pygame.joystick.init()
-        # pump events so the new joystick can register button states properly
+        # give the OS a moment for the device to settle
+        time.sleep(0.1)
+        # pump and clear events so button states start fresh
         pygame.event.pump()
+        pygame.event.clear()
         # also reset our controller ID counter so we always start at 0
         xbox360_controller.Controller.id_num = 0
         
@@ -198,7 +201,9 @@ class XboxControllerReader:
 
 
     def poll(self) -> MotorCommand:
-        pygame.event.pump()
+        # process input events; use get() to ensure state is updated
+        for _ in pygame.event.get():
+            pass
 
         pressed = self.controller.get_buttons()
         lt_x, lt_y = self.controller.get_left_stick()
