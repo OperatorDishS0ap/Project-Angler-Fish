@@ -1,17 +1,6 @@
-#!/usr/bin/env python3
-"""
-CSI Camera (Camera Module 3) streamer for Raspberry Pi (libcamera stack).
-
-Stream protocol (to PC):
-  [4-byte big-endian length][JPEG bytes]...
-
-Preferred backend: Picamera2 (libcamera) -> numpy -> cv2.imencode -> TCP
-Fallback: OpenCV VideoCapture (USB/V4L2) if Picamera2 is not available.
-"""
 import socket
 import struct
 import time
-
 import cv2
 
 
@@ -19,9 +8,9 @@ HOST = "0.0.0.0"
 PORT = 8000
 
 # Streaming settings
-WIDTH = 1920
-HEIGHT = 1080
-FPS = 50
+WIDTH = 1280
+HEIGHT = 720
+FPS = 100
 JPEG_QUALITY = 75
 
 # Fallback (USB cam) if picamera2 isn't installed
