@@ -19,8 +19,8 @@ HOST = "0.0.0.0"
 PORT = 8000
 
 # Streaming settings
-WIDTH = 640
-HEIGHT = 480
+WIDTH = 1280
+HEIGHT = 720
 FPS = 30
 JPEG_QUALITY = 75
 
@@ -50,6 +50,8 @@ def _run_picamera2():
         conn, addr = srv.accept()
         print(f"[sub_camera] Client connected: {addr}")
         try:
+            frame_count = 0
+            start_time = time.time()
             while True:
                 frame = picam2.capture_array()  # RGB888
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
@@ -60,6 +62,13 @@ def _run_picamera2():
                 data = jpg.tobytes()
                 conn.sendall(struct.pack(">I", len(data)))
                 conn.sendall(data)
+                frame_count += 1
+                elapsed = time.time() - start_time
+                if elapsed >= 5:  # Print FPS every 5 seconds
+                    actual_fps = frame_count / elapsed
+                    print(f"[sub_camera] FPS: {actual_fps:.2f}")
+                    frame_count = 0
+                    start_time = time.time()
                 time.sleep(1.0 / max(1, FPS))
         except Exception as e:
             print(f"[sub_camera] client disconnected ({e})")
