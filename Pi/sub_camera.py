@@ -52,23 +52,26 @@ def _run_picamera2():
         try:
             frame_count = 0
             start_time = time.time()
+            actual_fps = 0
             while True:
                 frame = picam2.capture_array()  # RGB888
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 frame_bgr = cv2.flip(frame_bgr, 0)  # Flip vertically
+                frame_count += 1
+                elapsed = time.time() - start_time
+                if elapsed >= 1:  # Update FPS every 1 second
+                    actual_fps = frame_count / elapsed
+                    frame_count = 0
+                    start_time = time.time()
+                # Draw FPS on frame
+                cv2.putText(frame_bgr, f"FPS: {actual_fps:.1f}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 ok, jpg = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                 if not ok:
                     continue
                 data = jpg.tobytes()
                 conn.sendall(struct.pack(">I", len(data)))
                 conn.sendall(data)
-                frame_count += 1
-                elapsed = time.time() - start_time
-                if elapsed >= 5:  # Print FPS every 5 seconds
-                    actual_fps = frame_count / elapsed
-                    print(f"[sub_camera] FPS: {actual_fps:.2f}")
-                    frame_count = 0
-                    start_time = time.time()
                 time.sleep(1.0 / max(1, FPS))
         except Exception as e:
             print(f"[sub_camera] client disconnected ({e})")
