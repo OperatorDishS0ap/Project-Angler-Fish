@@ -19,8 +19,8 @@ HOST = "0.0.0.0"
 PORT = 8000
 
 # Streaming settings
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 640
+HEIGHT = 480
 FPS = 30
 JPEG_QUALITY = 75
 
