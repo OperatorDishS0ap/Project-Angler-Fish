@@ -33,7 +33,7 @@ def _run_picamera2():
 
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
-        main={"size": (WIDTH, HEIGHT), "format": "RGB888"},
+        main={"size": (WIDTH, HEIGHT), "format": "BGR888"},
         controls={"FrameRate": FPS},
     )
     picam2.configure(config)
