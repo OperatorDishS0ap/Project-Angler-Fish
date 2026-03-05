@@ -165,14 +165,8 @@ class MotorUdpSender:
             time.sleep(dt)
 
 class XboxControllerReader:
-    """
-    Controller reader using pygame-xbox360controller (xbox360_controller.py).
-    """
+
     def __init__(self):
-        # Reinitialize pygame joystick module to clear cached joystick IDs
-        pygame.joystick.quit()
-        pygame.joystick.init()
-        
         if pygame.joystick.get_count() == 0:
             raise RuntimeError("No Xbox controller detected.")
 
@@ -181,14 +175,6 @@ class XboxControllerReader:
         self._last_debug = 0.0
         self._a_btn_last_press_time = 0.0
         self.latest_cmd = MotorCommand()
-    
-    def cleanup(self):
-        """Clean up controller resources."""
-        try:
-            if self.controller:
-                self.controller = None
-        except Exception:
-            pass
 
     def poll(self) -> MotorCommand:
         pygame.event.pump()

@@ -294,8 +294,6 @@ class AnglerFishApp(tk.Tk):
             self.sensor_rx.stop()
         if self.motor_sender:
             self.motor_sender.stop()
-        if self.controller:
-            self.controller.cleanup()
 
         self.camera_client = None
         self.sensor_rx = None
