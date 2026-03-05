@@ -9,7 +9,7 @@ import ms5837
 from mpu6050 import mpu6050
 
 sensor = ms5837.MS5837_30BA()
-imu = mpu6050(0x68)  # MPU6050 I2C address
+imu = mpu6050(0x68)  #MPU6050 I2C address
 
 if not sensor.init():
     print("Sensor could not be initialized")
@@ -20,7 +20,7 @@ if not sensor.read():
 
 PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # set to your Windows ethernet IP
 PC_PORT = 9100
-RATE_HZ = 5.0
+RATE_HZ = 30.0
 
 def read_pi_temp_c() -> float:
     try:
