@@ -53,6 +53,7 @@ def _run_picamera2():
             while True:
                 frame = picam2.capture_array()  # RGB888
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                frame_bgr = cv2.flip(frame_bgr, 0)  # Flip vertically
                 ok, jpg = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                 if not ok:
                     continue
@@ -90,6 +91,7 @@ def _run_opencv_fallback():
                 if not ok:
                     time.sleep(0.05)
                     continue
+                frame = cv2.flip(frame, 0)  # Flip vertically
                 ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
                 if not ok:
                     continue
