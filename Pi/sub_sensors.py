@@ -41,6 +41,7 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dt = 1.0 / max(1.0, RATE_HZ)
     speed = 0.0  # Integrated speed from acceleration
+    GRAVITY = 9.8  # m/s²
     
     while True:
         temp_pi = read_pi_temp_c()
@@ -52,17 +53,27 @@ def main():
         imu_temp = imu.get_temp()
         
         # Calculate acceleration magnitude
-        acceleration = math.sqrt(accel['x']**2 + accel['y']**2 + accel['z']**2)
+        accel_magnitude = math.sqrt(accel['x']**2 + accel['y']**2 + accel['z']**2)
+        
+        # Account for gravity - subtract gravitational component
+        # When stationary, accel_magnitude ~= 9.8, so motion_accel ~= 0
+        motion_accel = max(0, accel_magnitude - GRAVITY)
         
         # Integrate acceleration to estimate speed
-        speed += acceleration * dt
-        # Apply damping to reduce drift
-        speed *= 0.99
+        speed += motion_accel * dt
+        
+        # Apply exponential decay to prevent drift
+        # Time constant of ~5 seconds for decay
+        decay_factor = 0.97
+        speed *= decay_factor
+        
+        # Clamp speed to prevent unrealistic values
+        speed = max(0, speed)
 
         Debug = True
         if Debug:
             print(f"Pressure: {pressure:.2f} psi, Temp (Pi): {temp_pi:.2f} C, Temp (Env): {temp_env:.2f} C, Depth: {depth:.3f} m")
-            print(f"Speed: {speed:.2f} m/s, Accel: {acceleration:.2f} m/s²")
+            print(f"Speed: {speed:.2f} m/s, Accel: {motion_accel:.2f} m/s²")
 
         msg = {
             "ts": time.time(),
@@ -73,7 +84,7 @@ def main():
             "temp_env": temp_env,
             "temp_enclosure": imu_temp,
             "speed": speed,
-            "acceleration": acceleration,
+            "acceleration": motion_accel,
         }
         try:
             sock.sendto(json.dumps(msg).encode("utf-8"), (PC_IP, PC_PORT))
