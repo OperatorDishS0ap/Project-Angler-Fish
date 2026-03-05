@@ -172,13 +172,6 @@ class XboxControllerReader:
         # Reinitialize pygame joystick module to clear cached joystick IDs
         pygame.joystick.quit()
         pygame.joystick.init()
-        # give the OS a moment for the device to settle
-        time.sleep(0.1)
-        # pump and clear events so button states start fresh
-        pygame.event.pump()
-        pygame.event.clear()
-        # also reset our controller ID counter so we always start at 0
-        xbox360_controller.Controller.id_num = 0
         
         if pygame.joystick.get_count() == 0:
             raise RuntimeError("No Xbox controller detected.")
@@ -196,14 +189,9 @@ class XboxControllerReader:
                 self.controller = None
         except Exception:
             pass
-        # reset static counter as controllers are gone
-        xbox360_controller.Controller.id_num = 0
-
 
     def poll(self) -> MotorCommand:
-        # process input events; use get() to ensure state is updated
-        for _ in pygame.event.get():
-            pass
+        pygame.event.pump()
 
         pressed = self.controller.get_buttons()
         lt_x, lt_y = self.controller.get_left_stick()
@@ -211,9 +199,6 @@ class XboxControllerReader:
         triggers = self.controller.get_triggers()
         a_btn = pressed[xbox360_controller.A]
         pad = self.controller.get_pad()
-        # debug output of button states if debug
-        if self.debug:
-            print(f"[DEBUG] buttons={pressed} pad={pad} lt=({lt_x:.2f},{lt_y:.2f}) rt_x={rt_x:.2f} trig={triggers:.2f}")
 
         global a_flag
         # Debounce: only allow toggle if 500ms has passed since last press
