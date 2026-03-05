@@ -21,8 +21,8 @@ PORT = 8000
 # Streaming settings
 WIDTH = 640
 HEIGHT = 480
-FPS = 30
-JPEG_QUALITY = 75
+FPS = 60
+JPEG_QUALITY = 90
 
 # Fallback (USB cam) if picamera2 isn't installed
 USB_CAM_INDEX = 0
