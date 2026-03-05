@@ -235,15 +235,12 @@ class AnglerFishApp(tk.Tk):
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
 
-        self.pitch_var = tk.StringVar(value="Pitch: --°")
-        self.roll_var = tk.StringVar(value="Roll: --°")
-        self.yaw_rate_var = tk.StringVar(value="Yaw Rate: --°/s")
-        self.angular_vel_var = tk.StringVar(value="Angular Vel: --°/s")
+        self.speed_var = tk.StringVar(value="Speed: -- m/s")
         self.accel_var = tk.StringVar(value="Accel: -- m/s²")
 
-        ttk.Label(side, text="IMU Data", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.pitch_var, self.roll_var, self.yaw_rate_var, self.angular_vel_var, self.accel_var]:
-            ttk.Label(side, textvariable=v, font=("Segoe UI", 10)).pack(anchor="w", pady=2)
+        ttk.Label(side, text="Motion Data", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
+        for v in [self.speed_var, self.accel_var]:
+            ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
         # armed status variable must be initialized before use
@@ -345,10 +342,7 @@ class AnglerFishApp(tk.Tk):
                 self.press_var.set(f"Pressure: {t.pressure:.2f}")
                 self.temp_var.set(f"Temps: Pi {t.temp_pi:.1f} C | Env {t.temp_env:.1f} C")
                 self.enclosure_temp_var.set(f"Enclosure Temp: {t.temp_enclosure:.1f} C")
-                self.pitch_var.set(f"Pitch: {t.pitch:.1f}°")
-                self.roll_var.set(f"Roll: {t.roll:.1f}°")
-                self.yaw_rate_var.set(f"Yaw Rate: {t.yaw_rate:.1f}°/s")
-                self.angular_vel_var.set(f"Angular Vel: {t.angular_vel:.1f}°/s")
+                self.speed_var.set(f"Speed: {t.speed:.2f} m/s")
                 self.accel_var.set(f"Accel: {t.acceleration:.2f} m/s²")
 
             if self.controller and self.motor_sender:
