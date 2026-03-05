@@ -246,6 +246,8 @@ class AnglerFishApp(tk.Tk):
             ttk.Label(side, textvariable=v, font=("Segoe UI", 10)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
+        # armed status variable must be initialized before use
+        self.armed_var = tk.StringVar(value="DISARMED")
         self.armed_label = tk.Label(side, textvariable=self.armed_var, font=("Segoe UI", 14, "bold"), 
                                      relief="sunken", pady=8)
         self.armed_label.pack(anchor="w", fill="x", pady=4)
