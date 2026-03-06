@@ -47,9 +47,11 @@ PCT_DEADBAND = 2.0  # percent
 # -------------------------
 # LEGACY BINARY PROTOCOL
 # -------------------------
-CMD_FMT = "<4sI4h"
+CMD_FMT = "<4sI5h"
+CMD_FMT_OLD = "<4sI4h"
 CMD_MAGIC = b"SUB1"
 CMD_SIZE = struct.calcsize(CMD_FMT)
+CMD_SIZE_OLD = struct.calcsize(CMD_FMT_OLD)
 
 
 def clamp(v, lo, hi):
@@ -128,6 +130,9 @@ def main():
 
     last_rx = time.time()
     last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
+    arm_requested = False
+    arm_active = False
+    arm_started_at = None
 
     print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
 
@@ -138,18 +143,24 @@ def main():
                 data, _addr = sock.recvfrom(2048)
 
                 # 1) Legacy binary
-                if len(data) >= CMD_SIZE:
-                    magic, _seq, m1_i16, m2_i16, m3_i16, m4_i16 = struct.unpack(CMD_FMT, data[:CMD_SIZE])
-                    if magic == CMD_MAGIC:
-                        last = {
-                            "m1": i16_to_pct(m1_i16),
-                            "m2": i16_to_pct(m2_i16),
-                            "m3": i16_to_pct(m3_i16),
-                            "m4": i16_to_pct(m4_i16),
-                        }
-                        last_rx = time.time()
+                if len(data) >= CMD_SIZE_OLD and data[:4] == CMD_MAGIC:
+                    if len(data) >= CMD_SIZE:
+                        magic, _seq, m1_i16, m2_i16, m3_i16, m4_i16, arm_i16 = struct.unpack(CMD_FMT, data[:CMD_SIZE])
                     else:
+                        magic, _seq, m1_i16, m2_i16, m3_i16, m4_i16 = struct.unpack(CMD_FMT_OLD, data[:CMD_SIZE_OLD])
+                        arm_i16 = 1000  # Backward-compatible: old packets are treated as armed.
+
+                    if magic != CMD_MAGIC:
                         raise ValueError("Not legacy magic")
+
+                    last = {
+                        "m1": i16_to_pct(m1_i16),
+                        "m2": i16_to_pct(m2_i16),
+                        "m3": i16_to_pct(m3_i16),
+                        "m4": i16_to_pct(m4_i16),
+                    }
+                    arm_requested = arm_i16 > 0
+                    last_rx = time.time()
                 else:
                     # JSON fallback
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
@@ -159,6 +170,7 @@ def main():
                         "m3": float(msg.get("m3", last["m3"])),
                         "m4": float(msg.get("m4", last["m4"])),
                     }
+                    arm_requested = bool(msg.get("arm", arm_requested))
                     last_rx = time.time()
 
             except socket.timeout:
@@ -169,12 +181,32 @@ def main():
             # Failsafe -> neutral
             if time.time() - last_rx > COMMAND_TIMEOUT_S:
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
+                arm_requested = False
+
+            # Arm/disarm state machine for ESC safety.
+            if not arm_requested:
+                if arm_active:
+                    print("[sub_motors_400hz] DISARM command received; forcing neutral.")
+                arm_active = False
+                arm_started_at = None
+            else:
+                if arm_started_at is None:
+                    arm_started_at = time.time()
+                    arm_active = False
+                    print(f"[sub_motors_400hz] ARM command received; holding neutral for {ARM_TIME_S:.1f}s.")
+                elif not arm_active and (time.time() - arm_started_at) >= ARM_TIME_S:
+                    arm_active = True
+                    print("[sub_motors_400hz] ESC output armed.")
 
             # Apply outputs (PWM @ 400Hz)
-            set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"]))
-            set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"]))
-            set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"]))
-            set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"]))
+            if arm_active:
+                set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"]))
+                set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"]))
+                set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"]))
+                set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"]))
+            else:
+                for g in ALL_GPIOS:
+                    set_pulse_us(pi, g, PULSE_NEUTRAL)
 
             time.sleep(LOOP_SLEEP_S)
 
