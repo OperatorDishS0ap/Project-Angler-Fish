@@ -51,10 +51,11 @@ def _choose_pipeline() -> str:
     if has_v4l2:
         print("[sub_camera] Using v4l2h264enc (hardware)")
         if has_v4l2convert:
-            # Prefer v4l2convert in front of the encoder to avoid STREAMON/caps issues.
+            # Convert NV21 (libcamerasrc default here) to NV12 for the encoder.
+            # Use default io-mode to avoid dmabuf-import failures on some Pi stacks.
             return (
-                f"libcamerasrc ! video/x-raw,width={WIDTH},height={HEIGHT},framerate={FPS}/1 ! "
-                "v4l2convert output-io-mode=dmabuf-import capture-io-mode=dmabuf ! "
+                f"libcamerasrc ! video/x-raw,format=NV21,width={WIDTH},height={HEIGHT},framerate={FPS}/1 ! "
+                "v4l2convert ! "
                 "video/x-raw,format=NV12 ! "
                 f"v4l2h264enc extra-controls=\"controls,video_bitrate={BITRATE},repeat_sequence_header=1,h264_profile=4;\" ! "
                 "h264parse config-interval=1 ! "
