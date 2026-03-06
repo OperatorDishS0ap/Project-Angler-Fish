@@ -3,7 +3,7 @@ import time
 import io
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
-from picamera2.outputs import CircularOutput
+from picamera2.outputs import Output
 
 
 HOST = "0.0.0.0"
@@ -14,6 +14,18 @@ WIDTH = 1280
 HEIGHT = 720
 FPS = 30
 BITRATE = 2000000  # 2 Mbps
+
+class UdpOutput(Output):
+    def __init__(self, socket, addr):
+        super().__init__()
+        self.socket = socket
+        self.addr = addr
+        self.packets_sent = 0
+
+    def outputframe(self, frame, keyframe=True, timestamp=None):
+        if frame:
+            self.socket.sendto(frame, self.addr)
+            self.packets_sent += 1
 
 def _run_picamera2():
     picam2 = Picamera2()
@@ -36,29 +48,13 @@ def _run_picamera2():
             print(f"[sub_camera] Client connected: {addr}")
             break
 
-    # Custom output that sends H.264 packets via UDP
-    class UdpOutput:
-        def __init__(self, socket, addr):
-            self.socket = socket
-            self.addr = addr
-            self.packets_sent = 0
-
-        def write(self, data):
-            if data:
-                self.socket.sendto(data, self.addr)
-                self.packets_sent += 1
-
-        def flush(self):
-            pass
-
-    # Setup hardware H.264 encoder
+    # Setup hardware H.264 encoder with UDP output
     output = UdpOutput(srv, client_addr)
     encoder = H264Encoder(bitrate=BITRATE)
     picam2.start_recording(encoder, output)
     
     print(f"[sub_camera] Started hardware H.264 encoding at {WIDTH}x{HEIGHT}@{FPS}fps")
 
-    frame_count = 0
     start_time = time.time()
     packets_sent = 0
     try:
