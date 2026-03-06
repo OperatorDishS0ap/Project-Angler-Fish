@@ -1,104 +1,110 @@
-"""RTSP server for H.264 video using GStreamer.
-
-Uses libcamerasrc on Raspberry Pi and serves an RTSP stream at:
-rtsp://<pi-ip>:8554/stream
-
-Dependencies: 
-    python3-gi
-    gir1.2-gst-rtsp-server-1.0
-    gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad
-
-Usage is simple: run this script and then open the RTSP URL from a PC or
-mobile device with an H.264-capable player or via OpenCV/FFmpeg.
-"""
-
+import shutil
+import subprocess
 import sys
-
-import gi
-
-gi.require_version("Gst", "1.0")
-gi.require_version("GstRtspServer", "1.0")
-from gi.repository import Gst, GstRtspServer, GLib
 
 # streaming parameters
 WIDTH = 640
 HEIGHT = 480
 FPS = 20
-BITRATE = 400000  # 400 kbps
+BITRATE = 400000  # bps
+RTSP_URL = "rtsp://0.0.0.0:8554/stream"
 
 
-class SensorFactory(GstRtspServer.RTSPMediaFactory):
-    def __init__(self, pipeline: str):
-        super().__init__()
-        print(f"[sub_camera] Pipeline: {pipeline}")
-        self.set_launch(pipeline)
-        self.set_shared(True)
+def _require_tool(name: str) -> None:
+    if shutil.which(name) is None:
+        raise RuntimeError(f"Missing required tool: {name}")
 
 
-class GstServer:
-    def __init__(self, pipeline: str):
-        self.server = GstRtspServer.RTSPServer()
-        mounts = self.server.get_mount_points()
-        mounts.add_factory("/stream", SensorFactory(pipeline))
-        self.server.attach(None)
-        print("[sub_camera] RTSP server started at rtsp://0.0.0.0:8554/stream")
+def _build_libcamera_cmd() -> list[str]:
+    # libcamera-vid uses Pi hardware H.264 encoder.
+    return [
+        "libcamera-vid",
+        "--nopreview",
+        "--inline",
+        "--codec",
+        "h264",
+        "--width",
+        str(WIDTH),
+        "--height",
+        str(HEIGHT),
+        "--framerate",
+        str(FPS),
+        "--bitrate",
+        str(BITRATE),
+        "-t",
+        "0",
+        "-o",
+        "-",
+    ]
 
 
-def _choose_pipeline() -> str:
-    has_v4l2 = Gst.ElementFactory.find("v4l2h264enc") is not None
+def _build_ffmpeg_cmd() -> list[str]:
+    # FFmpeg receives Annex-B H.264 and serves it via RTSP in listen mode.
+    return [
+        "ffmpeg",
+        "-loglevel",
+        "warning",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-f",
+        "h264",
+        "-i",
+        "-",
+        "-an",
+        "-c:v",
+        "copy",
+        "-f",
+        "rtsp",
+        "-rtsp_transport",
+        "tcp",
+        "-rtsp_flags",
+        "listen",
+        RTSP_URL,
+    ]
 
-    if has_v4l2:
-        print("[sub_camera] Using v4l2h264enc (hardware)")
-        # Conservative hardware path: avoid v4l2convert import issues and force mmap io-mode.
-        return (
-            f"libcamerasrc ! video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FPS}/1 ! "
-            "queue max-size-buffers=6 leaky=downstream ! "
-            f"v4l2h264enc output-io-mode=mmap capture-io-mode=mmap "
-            f"extra-controls=\"controls,video_bitrate={BITRATE},video_bitrate_mode=1,repeat_sequence_header=1,h264_i_frame_period={FPS};\" ! "
-            "h264parse config-interval=1 ! "
-            "rtph264pay name=pay0 pt=96 config-interval=1"
-        )
 
-    raise RuntimeError("No hardware H.264 encoder found (v4l2h264enc)")
-
-
-def main():
-    import os
-    os.environ['GST_DEBUG'] = '2'  # 0=none, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG
-    Gst.init(None)
-    
-    print("[sub_camera] Checking GStreamer components...")
-    registry = Gst.Registry.get()
-
-    required_plugins = ['libcamera', 'video4linux2', 'rtp']
-    for plugin_name in required_plugins:
-        plugin = registry.find_plugin(plugin_name)
-        if plugin:
-            print(f"[sub_camera] ✓ {plugin_name} plugin found")
-        else:
-            print(f"[sub_camera] ✗ {plugin_name} plugin NOT found")
-
-    for elem in ["libcamerasrc", "queue", "v4l2h264enc", "h264parse", "rtph264pay"]:
-        factory = Gst.ElementFactory.find(elem)
-        if factory:
-            print(f"[sub_camera] ✓ {elem} element found")
-        else:
-            print(f"[sub_camera] ✗ {elem} element NOT found")
-
+def main() -> None:
     try:
-        pipeline = _choose_pipeline()
+        _require_tool("libcamera-vid")
+        _require_tool("ffmpeg")
     except Exception as e:
         print(f"[sub_camera] ERROR: {e}")
-        print("[sub_camera] Install/verify hardware stack: sudo apt install gstreamer1.0-plugins-good gstreamer1.0-libcamera")
+        print("[sub_camera] Install: sudo apt install ffmpeg libcamera-apps")
         sys.exit(1)
 
-    server = GstServer(pipeline)
-    loop = GLib.MainLoop()
+    cam_cmd = _build_libcamera_cmd()
+    ff_cmd = _build_ffmpeg_cmd()
+    print("[sub_camera] Using hardware H.264 via libcamera-vid")
+    print(f"[sub_camera] RTSP server: {RTSP_URL}")
+
+    cam_proc = None
+    ff_proc = None
     try:
-        loop.run()
+        cam_proc = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        ff_proc = subprocess.Popen(ff_cmd, stdin=cam_proc.stdout)
+
+        # Ensure only ffmpeg owns the camera stdout pipe.
+        if cam_proc.stdout is not None:
+            cam_proc.stdout.close()
+
+        # Wait until one process exits.
+        ff_rc = ff_proc.wait()
+        cam_rc = cam_proc.poll()
+        print(f"[sub_camera] ffmpeg exited rc={ff_rc}, libcamera rc={cam_rc}")
     except KeyboardInterrupt:
         print("[sub_camera] Shutting down")
-        sys.exit(0)
+    finally:
+        for proc in (ff_proc, cam_proc):
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+        for proc in (ff_proc, cam_proc):
+            if proc is not None:
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    proc.kill()
 
 
 if __name__ == "__main__":
