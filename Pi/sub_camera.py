@@ -6,7 +6,7 @@ over RTSP using gst-rtsp-server. Clients can connect to
 
 tsp://<pi-ip>:8554/stream.
 
-Dependencies:
+Dependencies: 
     python3-gi
     gir1.2-gst-rtsp-server-1.0
     gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad
@@ -21,7 +21,7 @@ import gi
 
 gi.require_version("Gst", "1.0")
 gi.require_version("GstRtspServer", "1.0")
-from gi.repository import Gst, GstRtspServer, GObject
+from gi.repository import Gst, GstRtspServer, GLib
 
 # initialize GStreamer
 Gst.init(None)
@@ -36,8 +36,9 @@ BITRATE = 500000  # 500 kbps
 class SensorFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self):
         super().__init__()
+        # use libcamerasrc for Raspberry Pi camera
         pipeline = (
-            f"v4l2src device=/dev/video0 ! video/x-raw,width={WIDTH},height={HEIGHT},"
+            f"libcamerasrc ! video/x-raw,width={WIDTH},height={HEIGHT},"
             f"framerate={FPS}/1 ! videoconvert ! v4l2h264enc bitrate={BITRATE} ! "
             "rtph264pay name=pay0 pt=96"
         )
@@ -56,7 +57,7 @@ class GstServer:
 
 def main():
     server = GstServer()
-    loop = GObject.MainLoop()
+    loop = GLib.MainLoop()
     try:
         loop.run()
     except KeyboardInterrupt:
