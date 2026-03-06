@@ -12,7 +12,7 @@ from gi.repository import Gst, GstRtspServer, GLib
 # streaming parameters
 WIDTH = 1280
 HEIGHT = 720
-FPS = 30
+FPS = 100
 BITRATE = 2500000  # bps
 VFLIP = True
 HFLIP = False
