@@ -10,15 +10,23 @@ BITRATE = 400000  # bps
 RTSP_URL = "rtsp://0.0.0.0:8554/stream"
 
 
+def _find_camera_tool() -> str:
+    # Newer Raspberry Pi OS uses rpicam-vid; older uses libcamera-vid.
+    for name in ("rpicam-vid", "libcamera-vid"):
+        if shutil.which(name):
+            return name
+    raise RuntimeError("Missing required camera tool: rpicam-vid/libcamera-vid")
+
+
 def _require_tool(name: str) -> None:
     if shutil.which(name) is None:
         raise RuntimeError(f"Missing required tool: {name}")
 
 
-def _build_libcamera_cmd() -> list[str]:
+def _build_libcamera_cmd(camera_tool: str) -> list[str]:
     # libcamera-vid uses Pi hardware H.264 encoder.
     return [
-        "libcamera-vid",
+        camera_tool,
         "--nopreview",
         "--inline",
         "--codec",
@@ -67,16 +75,16 @@ def _build_ffmpeg_cmd() -> list[str]:
 
 def main() -> None:
     try:
-        _require_tool("libcamera-vid")
+        camera_tool = _find_camera_tool()
         _require_tool("ffmpeg")
     except Exception as e:
         print(f"[sub_camera] ERROR: {e}")
-        print("[sub_camera] Install: sudo apt install ffmpeg libcamera-apps")
+        print("[sub_camera] Install: sudo apt install ffmpeg libcamera-apps rpicam-apps")
         sys.exit(1)
 
-    cam_cmd = _build_libcamera_cmd()
+    cam_cmd = _build_libcamera_cmd(camera_tool)
     ff_cmd = _build_ffmpeg_cmd()
-    print("[sub_camera] Using hardware H.264 via libcamera-vid")
+    print(f"[sub_camera] Using hardware H.264 via {camera_tool}")
     print(f"[sub_camera] RTSP server: {RTSP_URL}")
 
     cam_proc = None
