@@ -4,3 +4,4 @@ paramiko
 numpy
 pillow
 av
+PySide6

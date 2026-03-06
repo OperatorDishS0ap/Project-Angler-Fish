@@ -2,12 +2,28 @@ import json
 import os
 import threading
 import time
-import tkinter as tk
-from tkinter import ttk, messagebox
 
 import cv2
-from PIL import Image, ImageTk  # pillow
 import paramiko
+from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from camera import CameraClient
 from controller import XboxControllerReader, MotorUdpSender
@@ -33,34 +49,48 @@ def save_config(cfg):
         pass
 
 
-class StatusBox(ttk.Frame):
+class StatusBox(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
-        self.var = tk.StringVar(value="Disconnected")
-        self.label = tk.Label(self, textvariable=self.var, width=18, relief="groove")
-        self.label.pack(fill="x")
+        self.label = QLabel("Disconnected")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setFrameShape(QFrame.Box)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.label)
+
         self.set_connected(False)
 
     def set_connected(self, connected: bool, text: str | None = None):
-        self.var.set(text if text is not None else ("Connected" if connected else "Disconnected"))
-        self.label.configure(bg=("light green" if connected else "tomato"))
+        self.label.setText(text if text is not None else ("Connected" if connected else "Disconnected"))
+        bg = "#90EE90" if connected else "#FF6347"
+        self.label.setStyleSheet(f"QLabel {{ background-color: {bg}; }}")
 
     def set_text(self, text: str):
-        self.var.set(text)
+        self.label.setText(text)
 
 
-class AnglerFishApp(tk.Tk):
+class AnglerFishApp(QMainWindow):
+    status1_conn_signal = Signal(bool, str)
+    status1_text_signal = Signal(str)
+    status2_conn_signal = Signal(bool, str)
+    status2_text_signal = Signal(str)
+    error_signal = Signal(str, str)
+    warning_signal = Signal(str, str)
+    show_page2_signal = Signal()
+    show_page1_signal = Signal()
+
     def __init__(self):
         super().__init__()
-        self.title("Project Angler Fish")
-        self.geometry("1200x700")
+        self.setWindowTitle("Project Angler Fish")
+        self.resize(1200, 700)
 
         cfg = load_config()
-        self.pi_ip = tk.StringVar(value=cfg.get("ip", "192.168.137.64"))
-        self.pi_user = tk.StringVar(value=cfg.get("user", "pi"))
-        self.pi_pass = tk.StringVar(value=cfg.get("pass", "raspberry"))
-        self.save_creds = tk.BooleanVar(value=cfg.get("save", True))
-        self.show_pass = tk.BooleanVar(value=False)
+        self.pi_ip = cfg.get("ip", "192.168.137.64")
+        self.pi_user = cfg.get("user", "pi")
+        self.pi_pass = cfg.get("pass", "raspberry")
+        self.save_creds = cfg.get("save", True)
 
         self.running = False
         self.start_time = None
@@ -70,21 +100,59 @@ class AnglerFishApp(tk.Tk):
         self.motor_sender = None
         self.controller = None
 
-        self.page1 = ttk.Frame(self)
-        self.page2 = ttk.Frame(self)
+        self.stack = QStackedWidget()
+        self.page1 = QWidget()
+        self.page2 = QWidget()
+
+        self.setCentralWidget(self.stack)
+        self.stack.addWidget(self.page1)
+        self.stack.addWidget(self.page2)
+
+        self.status1_conn_signal.connect(self._set_status1_connected)
+        self.status1_text_signal.connect(self._set_status1_text)
+        self.status2_conn_signal.connect(self._set_status2_connected)
+        self.status2_text_signal.connect(self._set_status2_text)
+        self.error_signal.connect(self._show_error)
+        self.warning_signal.connect(self._show_warning)
+        self.show_page2_signal.connect(self._show_page2)
+        self.show_page1_signal.connect(self._show_page1)
 
         self._build_page1()
         self._build_page2()
 
-        self.page1.pack(fill="both", expand=True)
-        self._ui_loop()
+        self.stack.setCurrentWidget(self.page1)
+
+        self.ui_timer = QTimer(self)
+        self.ui_timer.timeout.connect(self._ui_loop)
+        self.ui_timer.start(16)
+
+    def closeEvent(self, event):
+        self._stop_runtime_clients()
+        super().closeEvent(event)
+
+    def _show_error(self, title: str, text: str):
+        QMessageBox.critical(self, title, text)
+
+    def _show_warning(self, title: str, text: str):
+        QMessageBox.warning(self, title, text)
+
+    def _set_status1_connected(self, connected: bool, text: str):
+        self.status1.set_connected(connected, text)
+
+    def _set_status1_text(self, text: str):
+        self.status1.set_text(text)
+
+    def _set_status2_connected(self, connected: bool, text: str):
+        self.status2.set_connected(connected, text)
+
+    def _set_status2_text(self, text: str):
+        self.status2.set_text(text)
 
     # SSH helpers
     def _ssh_connect(self):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.pi_ip.get().strip(), username=self.pi_user.get().strip(),
-                       password=self.pi_pass.get(), timeout=8)
+        client.connect(self.pi_ip_input.text().strip(), username=self.pi_user_input.text().strip(), password=self.pi_pass_input.text(), timeout=8)
         return client
 
     def _ssh_run(self, client, cmd: str):
@@ -95,65 +163,76 @@ class AnglerFishApp(tk.Tk):
 
     # Page 1
     def _build_page1(self):
-        f = self.page1
+        root_layout = QVBoxLayout(self.page1)
+        root_layout.setContentsMargins(24, 24, 24, 24)
+        root_layout.setSpacing(10)
 
-        ttk.Label(f, text="Project Angler Fish", font=("Segoe UI", 20, "bold")).pack(pady=12)
+        title = QLabel("Project Angler Fish")
+        title.setStyleSheet("font-size: 28px; font-weight: 700;")
+        root_layout.addWidget(title, alignment=Qt.AlignHCenter)
 
-        form = ttk.Frame(f)
-        form.pack(pady=10)
+        form_wrap = QWidget()
+        form_layout = QFormLayout(form_wrap)
 
-        ttk.Label(form, text="IP Address:").grid(row=0, column=0, sticky="e", padx=6, pady=6)
-        ttk.Entry(form, textvariable=self.pi_ip, width=24).grid(row=0, column=1, sticky="w", padx=6, pady=6)
+        self.pi_ip_input = QLineEdit(self.pi_ip)
+        self.pi_user_input = QLineEdit(self.pi_user)
+        self.pi_pass_input = QLineEdit(self.pi_pass)
+        self.pi_pass_input.setEchoMode(QLineEdit.Password)
 
-        ttk.Label(form, text="Username:").grid(row=1, column=0, sticky="e", padx=6, pady=6)
-        ttk.Entry(form, textvariable=self.pi_user, width=24).grid(row=1, column=1, sticky="w", padx=6, pady=6)
+        form_layout.addRow("IP Address:", self.pi_ip_input)
+        form_layout.addRow("Username:", self.pi_user_input)
+        form_layout.addRow("Password:", self.pi_pass_input)
 
-        ttk.Label(form, text="Password:").grid(row=2, column=0, sticky="e", padx=6, pady=6)
-        self.pass_entry = ttk.Entry(form, textvariable=self.pi_pass, width=24, show="*")
-        self.pass_entry.grid(row=2, column=1, sticky="w", padx=6, pady=6)
+        self.show_pass_check = QCheckBox("Show password")
+        self.show_pass_check.toggled.connect(self._toggle_pass)
+        self.save_creds_check = QCheckBox("Save IP/User/Password")
+        self.save_creds_check.setChecked(self.save_creds)
+        form_layout.addRow("", self.show_pass_check)
+        form_layout.addRow("", self.save_creds_check)
 
-        ttk.Checkbutton(form, text="Show password", variable=self.show_pass, command=self._toggle_pass).grid(
-            row=3, column=1, sticky="w", padx=6, pady=2
-        )
-        ttk.Checkbutton(form, text="Save IP/User/Password", variable=self.save_creds).grid(
-            row=4, column=1, sticky="w", padx=6, pady=2
-        )
+        root_layout.addWidget(form_wrap, alignment=Qt.AlignHCenter)
 
-        self.status1 = StatusBox(f)
-        self.status1.pack(pady=10)
+        self.status1 = StatusBox(self.page1)
+        self.status1.setFixedWidth(220)
+        root_layout.addWidget(self.status1, alignment=Qt.AlignHCenter)
 
-        btns = ttk.Frame(f)
-        btns.pack(pady=10)
+        btn_row = QHBoxLayout()
+        update_btn = QPushButton("Update Submarine")
+        update_btn.clicked.connect(self._on_update_sub)
+        start_btn = QPushButton("Start Submarine")
+        start_btn.clicked.connect(self._on_start_sub)
+        btn_row.addWidget(update_btn)
+        btn_row.addWidget(start_btn)
+        root_layout.addLayout(btn_row)
+        root_layout.addStretch()
 
-        ttk.Button(btns, text="Update Submarine", command=self._on_update_sub).grid(row=0, column=0, padx=10)
-        ttk.Button(btns, text="Start Submarine", command=self._on_start_sub).grid(row=0, column=1, padx=10)
-
-        ttk.Label(f, text=f"Config file: {CONFIG_PATH}", foreground="gray").pack(pady=6)
-
-    def _toggle_pass(self):
-        self.pass_entry.configure(show="" if self.show_pass.get() else "*")
+    def _toggle_pass(self, checked: bool):
+        self.pi_pass_input.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
 
     def _maybe_save_creds(self):
-        if self.save_creds.get():
-            save_config({"ip": self.pi_ip.get(), "user": self.pi_user.get(), "pass": self.pi_pass.get(), "save": True})
+        ip = self.pi_ip_input.text()
+        user = self.pi_user_input.text()
+        pw = self.pi_pass_input.text()
+        if self.save_creds_check.isChecked():
+            save_config({"ip": ip, "user": user, "pass": pw, "save": True})
         else:
-            save_config({"ip": self.pi_ip.get(), "user": self.pi_user.get(), "save": False})
+            save_config({"ip": ip, "user": user, "save": False})
 
     def _on_update_sub(self):
         self._maybe_save_creds()
 
         def worker():
             try:
-                self.status1.set_connected(True, "Connected")
+                self.status1_conn_signal.emit(True, "Connected")
                 client = self._ssh_connect()
-                self.status1.set_text("Updating Files")
+                self.status1_text_signal.emit("Updating Files")
                 self._ssh_run(client, "cd ~/Project-Angler-Fish && git pull")
                 time.sleep(6)
                 client.close()
-                self.status1.set_connected(False, "Disconnected")
+                self.status1_conn_signal.emit(False, "Disconnected")
             except Exception as e:
-                self.status1.set_connected(False, "Disconnected")
-                messagebox.showerror("Update failed", str(e))
+                self.status1_conn_signal.emit(False, "Disconnected")
+                self.error_signal.emit("Update failed", str(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -162,118 +241,153 @@ class AnglerFishApp(tk.Tk):
 
         def worker():
             try:
-                self.status1.set_connected(True, "Connected")
+                self.status1_conn_signal.emit(True, "Connected")
                 client = self._ssh_connect()
                 cmd = "sudo pigpiod"
                 self._ssh_run(client, cmd)
                 cmd = "nohup python3 /home/pi/Project-Angler-Fish/Pi/sub_launcher.py > launcher.log 2>&1 &"
                 self._ssh_run(client, cmd)
                 client.close()
-                self.status1.set_connected(False, "Disconnected")
+                self.status1_conn_signal.emit(False, "Disconnected")
                 time.sleep(2)
                 self._start_runtime_clients()
-                self._show_page2()
+                self.show_page2_signal.emit()
             except Exception as e:
-                self.status1.set_connected(False, "Disconnected")
-                messagebox.showerror("Start failed", str(e))
+                self.status1_conn_signal.emit(False, "Disconnected")
+                self.error_signal.emit("Start failed", str(e))
 
         threading.Thread(target=worker, daemon=True).start()
 
     # Page 2
     def _build_page2(self):
-        f = self.page2
+        root_layout = QVBoxLayout(self.page2)
 
-        top = ttk.Frame(f)
-        top.pack(fill="x", pady=6)
+        top_layout = QHBoxLayout()
+        top_title = QLabel("Project Angler Fish - Live")
+        top_title.setStyleSheet("font-size: 22px; font-weight: 700;")
+        top_layout.addWidget(top_title)
 
-        ttk.Label(top, text="Project Angler Fish - Live", font=("Segoe UI", 16, "bold")).pack(side="left", padx=10)
-        self.status2 = StatusBox(top)
-        self.status2.pack(side="left", padx=10)
-        ttk.Button(top, text="Shutdown Submarine", command=self._on_shutdown).pack(side="right", padx=10)
+        self.status2 = StatusBox(self.page2)
+        self.status2.setFixedWidth(180)
+        top_layout.addWidget(self.status2)
+        top_layout.addStretch()
 
-        body = ttk.Frame(f)
-        body.pack(fill="both", expand=True)
+        shutdown_btn = QPushButton("Shutdown Submarine")
+        shutdown_btn.clicked.connect(self._on_shutdown)
+        top_layout.addWidget(shutdown_btn)
 
-        # Grid layout prevents the video widget from pushing/covering the right panel.
-        body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=0)
-        body.rowconfigure(0, weight=1)
+        root_layout.addLayout(top_layout)
 
-        video_frame = ttk.Frame(body)
-        video_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        video_frame.columnconfigure(0, weight=1)
-        video_frame.rowconfigure(0, weight=1)
+        body_layout = QGridLayout()
+        body_layout.setColumnStretch(0, 1)
+        body_layout.setColumnStretch(1, 0)
 
-        self.video_label = tk.Label(video_frame, text="Waiting for video...", bg="black", fg="white")
-        self.video_label.grid(row=0, column=0, sticky="nsew")
+        self.video_label = QLabel("Waiting for video...")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setStyleSheet("background-color: black; color: white;")
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        body_layout.addWidget(self.video_label, 0, 0)
 
-        side = ttk.Frame(body, width=320)
-        side.grid(row=0, column=1, sticky="ns", padx=10, pady=10)
-        side.grid_propagate(False)
+        side = QWidget()
+        side.setFixedWidth(320)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(8, 8, 8, 8)
+        side_layout.setSpacing(6)
 
-        self.battery_var = tk.StringVar(value="Battery: -- V")
-        self.depth_var = tk.StringVar(value="Depth: --")
-        self.press_var = tk.StringVar(value="Pressure: --")
-        self.temp_var = tk.StringVar(value="Temps: Pi -- C | Env -- C")
-        self.enclosure_temp_var = tk.StringVar(value="Enclosure Temp: -- C")
-        self.timer_var = tk.StringVar(value="Timer: 00:00")
+        # System status block
+        sys_title = QLabel("System")
+        sys_title.setStyleSheet("font-weight: 700;")
+        side_layout.addWidget(sys_title)
 
-        for v in [self.battery_var, self.depth_var, self.press_var, self.temp_var, self.enclosure_temp_var, self.timer_var]:
-            ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=4)
+        self.timer_label = QLabel("Timer: 00:00")
+        self.battery_label = QLabel("Battery: -- V")
+        self.temp_label = QLabel("Pi Temp: -- C")
+        self.video_fps_label = QLabel("Video FPS: --")
+        for lbl in [self.timer_label, self.battery_label, self.temp_label, self.video_fps_label]:
+            side_layout.addWidget(lbl)
 
-        ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        side_layout.addWidget(sep1)
 
-        self.m1_var = tk.StringVar(value="m1: 0")
-        self.m2_var = tk.StringVar(value="m2: 0")
-        self.m3_var = tk.StringVar(value="m3: 0")
-        self.m4_var = tk.StringVar(value="m4: 0")
-        self.a_flag_var = tk.StringVar(value="a_flag: 0")
+        # Water/environment block
+        env_title = QLabel("Environment")
+        env_title.setStyleSheet("font-weight: 700;")
+        side_layout.addWidget(env_title)
 
-        ttk.Label(side, text="Vectoring", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.m1_var, self.m2_var, self.m3_var, self.m4_var, self.a_flag_var]:
-            ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
+        self.depth_label = QLabel("Depth: --")
+        self.press_label = QLabel("Pressure: --")
+        self.env_temp_label = QLabel("Water Temp: -- C")
+        self.enclosure_temp_label = QLabel("Enclosure Temp: -- C")
+        for lbl in [self.depth_label, self.press_label, self.env_temp_label, self.enclosure_temp_label]:
+            side_layout.addWidget(lbl)
 
-        ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        side_layout.addWidget(sep2)
 
-        self.speed_var = tk.StringVar(value="Speed: -- m/s")
-        self.accel_var = tk.StringVar(value="Accel: -- m/s²")
-        self.video_fps_var = tk.StringVar(value="Video FPS: --")
+        # Motion block
+        motion_title = QLabel("Motion")
+        motion_title.setStyleSheet("font-weight: 700;")
+        side_layout.addWidget(motion_title)
+        self.speed_label = QLabel("Speed: -- m/s")
+        self.accel_label = QLabel("Accel: -- m/s^2")
+        for lbl in [self.speed_label, self.accel_label]:
+            side_layout.addWidget(lbl)
 
-        ttk.Label(side, text="Motion Data", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.speed_var, self.accel_var, self.video_fps_var]:
-            ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.HLine)
+        side_layout.addWidget(sep3)
 
-        ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
-        # armed status variable must be initialized before use
-        self.armed_var = tk.StringVar(value="DISARMED")
-        self.armed_label = tk.Label(side, textvariable=self.armed_var, font=("Segoe UI", 14, "bold"), 
-                                     relief="sunken", pady=8)
-        self.armed_label.pack(anchor="w", fill="x", pady=4)
+        # Thruster command block
+        vector_title = QLabel("Thruster Command")
+        vector_title.setStyleSheet("font-weight: 700;")
+        side_layout.addWidget(vector_title)
+        self.m1_label = QLabel("m1: 0")
+        self.m2_label = QLabel("m2: 0")
+        self.m3_label = QLabel("m3: 0")
+        self.m4_label = QLabel("m4: 0")
+        for lbl in [self.m1_label, self.m2_label, self.m3_label, self.m4_label]:
+            side_layout.addWidget(lbl)
+
+        sep4 = QFrame()
+        sep4.setFrameShape(QFrame.HLine)
+        side_layout.addWidget(sep4)
+
+        self.armed_label = QLabel("DISARMED")
+        self.armed_label.setAlignment(Qt.AlignCenter)
+        self.armed_label.setMinimumHeight(36)
+        self.armed_label.setFrameShape(QFrame.Panel)
+        self.armed_label.setFrameShadow(QFrame.Sunken)
+        side_layout.addWidget(self.armed_label)
+
+        side_layout.addStretch()
+        body_layout.addWidget(side, 0, 1)
+
+        root_layout.addLayout(body_layout)
         self._update_armed_display(False)
 
     def _update_armed_display(self, armed: bool):
-        """Update ARMED status indicator visual."""
         if armed:
-            self.armed_var.set("ARMED")
-            self.armed_label.configure(bg="#00ff00", fg="black")
+            self.armed_label.setText("ARMED")
+            self.armed_label.setStyleSheet("background-color: #00ff00; color: black; font-weight: 700;")
         else:
-            self.armed_var.set("DISARMED")
-            self.armed_label.configure(bg="#ff6b6b", fg="white")
+            self.armed_label.setText("DISARMED")
+            self.armed_label.setStyleSheet("background-color: #ff6b6b; color: white; font-weight: 700;")
 
     def _show_page2(self):
-        self.page1.pack_forget()
-        self.page2.pack(fill="both", expand=True)
+        self.stack.setCurrentWidget(self.page2)
 
     def _show_page1(self):
-        self.page2.pack_forget()
-        self.page1.pack(fill="both", expand=True)
+        self.stack.setCurrentWidget(self.page1)
 
     def _start_runtime_clients(self):
         self.start_time = time.time()
         self.running = True
 
         # use RTSP port and default path
-        self.camera_client = CameraClient(self.pi_ip.get().strip(), port=8554, path="stream", reconnect=True)
+        ip = self.pi_ip_input.text().strip()
+        self.camera_client = CameraClient(ip, port=8554, path="stream", reconnect=True)
         self.camera_client.start()
 
         self.sensor_rx = SensorUdpReceiver(listen_port=9100)
@@ -282,10 +396,10 @@ class AnglerFishApp(tk.Tk):
         try:
             self.controller = XboxControllerReader()
         except Exception as e:
-            messagebox.showwarning("Controller", f"Controller not ready: {e}")
+            self.warning_signal.emit("Controller", f"Controller not ready: {e}")
             self.controller = None
 
-        self.motor_sender = MotorUdpSender(self.pi_ip.get().strip(), pi_port=9000, rate_hz=30.0)
+        self.motor_sender = MotorUdpSender(ip, pi_port=9000, rate_hz=30.0)
         self.motor_sender.start()
 
     def _stop_runtime_clients(self):
@@ -306,8 +420,8 @@ class AnglerFishApp(tk.Tk):
     def _on_shutdown(self):
         def worker():
             try:
-                self.status2.set_connected(True, "Connected")
-                self.status2.set_text("Terminating")
+                self.status2_conn_signal.emit(True, "Connected")
+                self.status2_text_signal.emit("Terminating")
                 client = self._ssh_connect()
                 for name in [
                     "sub_launcher.py",
@@ -318,18 +432,18 @@ class AnglerFishApp(tk.Tk):
                     self._ssh_run(client, f"pkill -f {name} || true")
                     time.sleep(0.2)
                 client.close()
-                self.status2.set_connected(False, "Disconnected")
+                self.status2_conn_signal.emit(False, "Disconnected")
             except Exception as e:
-                self.status2.set_connected(False, "Disconnected")
-                messagebox.showerror("Shutdown failed", str(e))
+                self.status2_conn_signal.emit(False, "Disconnected")
+                self.error_signal.emit("Shutdown failed", str(e))
             finally:
                 self._stop_runtime_clients()
-                self._show_page1()
+                self.show_page1_signal.emit()
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _ui_loop(self):
-        if self.page2.winfo_ismapped():
+        if self.stack.currentWidget() is self.page2:
             if self.camera_client and self.camera_client.connected:
                 self.status2.set_connected(True, "Connected")
             else:
@@ -337,47 +451,44 @@ class AnglerFishApp(tk.Tk):
 
             if self.sensor_rx:
                 t = self.sensor_rx.latest
-                self.battery_var.set(f"Battery: {t.battery:.2f} V")
-                self.depth_var.set(f"Depth: {t.depth:.2f}")
-                self.press_var.set(f"Pressure: {t.pressure:.2f}")
-                self.temp_var.set(f"Temps: Pi {t.temp_pi:.1f} C | Env {t.temp_env:.1f} C")
-                self.enclosure_temp_var.set(f"Enclosure Temp: {t.temp_enclosure:.1f} C")
-                self.speed_var.set(f"Speed: {t.speed:.2f} m/s")
-                self.accel_var.set(f"Accel: {t.acceleration:.2f} m/s²")
+                self.battery_label.setText(f"Battery: {t.battery:.2f} V")
+                self.depth_label.setText(f"Depth: {t.depth:.2f}")
+                self.press_label.setText(f"Pressure: {t.pressure:.2f}")
+                self.temp_label.setText(f"Pi Temp: {t.temp_pi:.1f} C")
+                self.env_temp_label.setText(f"Water Temp: {t.temp_env:.1f} C")
+                self.enclosure_temp_label.setText(f"Enclosure Temp: {t.temp_enclosure:.1f} C")
+                self.speed_label.setText(f"Speed: {t.speed:.2f} m/s")
+                self.accel_label.setText(f"Accel: {t.acceleration:.2f} m/s^2")
 
             if self.controller and self.motor_sender:
                 cmd = self.controller.poll()
                 self.motor_sender.set_target(cmd)
-                throttlep, yawp, pitchp, rollp, a_flagp = cmd.pct()
-                self.m1_var.set(f"m1: {throttlep:.0f}")
-                self.m2_var.set(f"m2: {yawp:.0f}")
-                self.m3_var.set(f"m3: {pitchp:.0f}")
-                self.m4_var.set(f"m4: {rollp:.0f}")
-                self.a_flag_var.set(f"a_flag: {a_flagp:.0f}")
+                throttlep, yawp, pitchp, rollp, _ = cmd.pct()
+                self.m1_label.setText(f"m1: {throttlep:.0f}")
+                self.m2_label.setText(f"m2: {yawp:.0f}")
+                self.m3_label.setText(f"m3: {pitchp:.0f}")
+                self.m4_label.setText(f"m4: {rollp:.0f}")
                 self._update_armed_display(bool(cmd.a_flag))
             if self.start_time:
                 elapsed = int(time.time() - self.start_time)
                 mm, ss = divmod(elapsed, 60)
-                self.timer_var.set(f"Timer: {mm:02d}:{ss:02d}")
+                self.timer_label.setText(f"Timer: {mm:02d}:{ss:02d}")
 
             if self.camera_client:
                 frame = self.camera_client.get_frame()
-                self.video_fps_var.set(f"Video FPS: {self.camera_client.fps:.1f}")
+                self.video_fps_label.setText(f"Video FPS: {self.camera_client.fps:.1f}")
                 if frame is not None:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = Image.fromarray(frame)
-
-                    w = max(1, self.video_label.winfo_width())
-                    h = max(1, self.video_label.winfo_height())
-                    img = img.resize((w, h))
-
-                    imgtk = ImageTk.PhotoImage(image=img)
-                    self.video_label.imgtk = imgtk
-                    self.video_label.configure(image=imgtk, text="")
-
-        self.after(16, self._ui_loop)
+                    h, w, ch = frame.shape
+                    qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
+                    pix = QPixmap.fromImage(qimg)
+                    scaled = pix.scaled(self.video_label.size(), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                    self.video_label.setPixmap(scaled)
+                    self.video_label.setText("")
 
 
 if __name__ == "__main__":
-    app = AnglerFishApp()
-    app.mainloop()
+    app = QApplication([])
+    win = AnglerFishApp()
+    win.show()
+    app.exec()
