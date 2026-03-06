@@ -42,8 +42,25 @@ class SensorFactory(GstRtspServer.RTSPMediaFactory):
             f"framerate={FPS}/1 ! videoconvert ! v4l2h264enc bitrate={BITRATE} ! "
             "rtph264pay name=pay0 pt=96"
         )
+        print(f"[sub_camera] Pipeline: {pipeline}")
         self.set_launch(pipeline)
         self.set_shared(True)
+    
+    def do_create_element(self, url):
+        """Override to add error logging."""
+        print(f"[sub_camera] Client requesting: {url.get_request_uri()}")
+        try:
+            element = super().do_create_element(url)
+            if element:
+                print("[sub_camera] Pipeline element created successfully")
+            else:
+                print("[sub_camera] ERROR: Pipeline element is None")
+            return element
+        except Exception as e:
+            print(f"[sub_camera] ERROR creating pipeline element: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 class GstServer:
@@ -56,6 +73,22 @@ class GstServer:
 
 
 def main():
+    # Enable GStreamer debug output
+    import os
+    os.environ['GST_DEBUG'] = '2'  # 0=none, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG
+    
+    print("[sub_camera] Checking GStreamer plugins...")
+    registry = Gst.Registry.get()
+    
+    # Check for required plugins
+    required_plugins = ['libcamera', 'video4linux2', 'videoconvert', 'rtp']
+    for plugin_name in required_plugins:
+        plugin = registry.find_plugin(plugin_name)
+        if plugin:
+            print(f"[sub_camera] ✓ {plugin_name} plugin found")
+        else:
+            print(f"[sub_camera] ✗ {plugin_name} plugin NOT found")
+    
     server = GstServer()
     loop = GLib.MainLoop()
     try:
