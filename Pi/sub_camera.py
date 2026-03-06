@@ -12,7 +12,7 @@ PORT = 8000
 # Streaming settings
 WIDTH = 1280
 HEIGHT = 720
-FPS = 100
+FPS = 30  # Reduced from 100 - software H.264 encoding is slow
 JPEG_QUALITY = 75
 
 def _run_picamera2():
@@ -44,7 +44,9 @@ def _run_picamera2():
     codec.height = HEIGHT
     codec.pix_fmt = 'yuv420p'
     codec.time_base = Fraction(1, FPS)
-    codec.bit_rate = 2000000  # Adjust bitrate as needed
+    codec.bit_rate = 2000000  # 2 Mbps bitrate
+    codec.options = {'preset': 'ultrafast', 'crf': '28'}  # Fast encoding, reasonable quality
+    codec.gop_size = 30  # Keyframe every 30 frames
     codec.open()
 
     frame_count = 0

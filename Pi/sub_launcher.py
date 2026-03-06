@@ -19,8 +19,8 @@ def start_all():
         if not os.path.exists(path):
             print(f"[launcher] Missing: {path}")
             continue
-        p = subprocess.Popen([sys.executable, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             preexec_fn=os.setsid)
+        p = subprocess.Popen([sys.executable, path],
+                             preexec_fn=os.setsid)  # Show output for debugging
         PROCS[name] = p
         print(f"[launcher] started {name} pid={p.pid}")
         time.sleep(0.2)
