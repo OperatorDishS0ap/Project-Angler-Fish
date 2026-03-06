@@ -271,7 +271,8 @@ class AnglerFishApp(tk.Tk):
         self.start_time = time.time()
         self.running = True
 
-        self.camera_client = CameraClient(self.pi_ip.get().strip(), port=8000, reconnect=True)
+        # use RTSP port and default path
+        self.camera_client = CameraClient(self.pi_ip.get().strip(), port=8554, path="stream", reconnect=True)
         self.camera_client.start()
 
         self.sensor_rx = SensorUdpReceiver(listen_port=9100)

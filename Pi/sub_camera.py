@@ -1,95 +1,67 @@
-import socket
-import time
-import io
-from picamera2 import Picamera2
-from picamera2.encoders import H264Encoder
-from picamera2.outputs import Output
+"""RTSP server for H.264 video using GStreamer.
 
+Replaces the previous UDP-based streaming approach. A hardware H.264
+encoder (4l2h264enc) is driven directly from the Pi camera and streamed
+over RTSP using gst-rtsp-server. Clients can connect to
 
-HOST = "0.0.0.0"
-PORT = 8000
+tsp://<pi-ip>:8554/stream.
 
-# Streaming settings
+Dependencies:
+    python3-gi
+    gir1.2-gst-rtsp-server-1.0
+    gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad
+
+Usage is simple: run this script and then open the RTSP URL from a PC or
+mobile device with an H.264-capable player or via OpenCV/FFmpeg.
+"""
+
+import sys
+
+import gi
+
+gi.require_version("Gst", "1.0")
+gi.require_version("GstRtspServer", "1.0")
+from gi.repository import Gst, GstRtspServer, GObject
+
+# initialize GStreamer
+Gst.init(None)
+
+# streaming parameters
 WIDTH = 640
 HEIGHT = 480
 FPS = 30
-BITRATE = 500000  # Reduced from 2Mbps to 500kbps to fit in UDP packets
+BITRATE = 500000  # 500 kbps
 
-class UdpOutput(Output):
-    def __init__(self, socket, addr):
+
+class SensorFactory(GstRtspServer.RTSPMediaFactory):
+    def __init__(self):
         super().__init__()
-        self.socket = socket
-        self.addr = addr
-        self.packets_sent = 0
-        self.max_udp_size = 65000  # Safe UDP packet size limit
-
-    def outputframe(self, frame, keyframe=None, timestamp=None, packet=None, audio=None):
-        if frame:
-            # Debug: print frame size
-            print(f"[sub_camera] Frame size: {len(frame)} bytes")
-            
-            # If frame fits in single UDP packet, send as-is
-            if len(frame) <= self.max_udp_size:
-                self.socket.sendto(frame, self.addr)
-                self.packets_sent += 1
-            else:
-                # Split large frames (this may break NAL units - not ideal)
-                print(f"[sub_camera] Splitting large frame: {len(frame)} bytes")
-                for i in range(0, len(frame), self.max_udp_size):
-                    chunk = frame[i:i + self.max_udp_size]
-                    self.socket.sendto(chunk, self.addr)
-                    self.packets_sent += 1
-
-def _run_picamera2():
-    picam2 = Picamera2()
-    config = picam2.create_video_configuration(
-        main={"size": (WIDTH, HEIGHT), "format": "RGB888"},
-        controls={"FrameRate": FPS},
-    )
-    picam2.configure(config)
-
-    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    srv.bind((HOST, PORT))
-    print(f"[sub_camera] (CSI/Picamera2) Listening on {HOST}:{PORT}")
-
-    # Wait for HELLO from client
-    client_addr = None
-    while True:
-        data, addr = srv.recvfrom(1024)
-        if data == b'HELLO':
-            client_addr = addr
-            print(f"[sub_camera] Client connected: {addr}")
-            break
-
-    # Setup hardware H.264 encoder with UDP output
-    output = UdpOutput(srv, client_addr)
-    encoder = H264Encoder(bitrate=BITRATE)
-    picam2.start_recording(encoder, output)
-    
-    print(f"[sub_camera] Started hardware H.264 encoding at {WIDTH}x{HEIGHT}@{FPS}fps")
-
-    start_time = time.time()
-    packets_sent = 0
-    try:
-        while True:
-            time.sleep(1.0)
-            packets_sent = output.packets_sent
-            output.packets_sent = 0
-            elapsed = time.time() - start_time
-            if elapsed >= 1:
-                print(f"[sub_camera] Packets sent: {packets_sent}")
-                start_time = time.time()
-    except Exception as e:
-        print(f"[sub_camera] Error: {e}")
-    finally:
-        picam2.stop_recording()
-        srv.close()
+        pipeline = (
+            f"v4l2src device=/dev/video0 ! video/x-raw,width={WIDTH},height={HEIGHT},"
+            f"framerate={FPS}/1 ! videoconvert ! v4l2h264enc bitrate={BITRATE} ! "
+            "rtph264pay name=pay0 pt=96"
+        )
+        self.set_launch(pipeline)
+        self.set_shared(True)
 
 
+class GstServer:
+    def __init__(self):
+        self.server = GstRtspServer.RTSPServer()
+        mounts = self.server.get_mount_points()
+        mounts.add_factory("/stream", SensorFactory())
+        self.server.attach(None)
+        print("[sub_camera] RTSP server started at rtsp://0.0.0.0:8554/stream")
 
 
 def main():
-    _run_picamera2()
+    server = GstServer()
+    loop = GObject.MainLoop()
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        print("[sub_camera] Shutting down")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
