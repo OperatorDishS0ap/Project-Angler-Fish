@@ -46,9 +46,7 @@ class CameraClient:
         except Exception:
             pass
         self._sock = None
-        if self._codec:
-            self._codec.close()
-            self._codec = None
+        self._codec = None
 
     def get_frame(self) -> Optional[np.ndarray]:
         with self._lock:
@@ -77,9 +75,7 @@ class CameraClient:
                             self._latest_frame = img
             except Exception as e:
                 self._connected = False
-                if self._codec:
-                    self._codec.close()
-                    self._codec = None
+                self._codec = None
                 try:
                     if self._sock:
                         self._sock.close()

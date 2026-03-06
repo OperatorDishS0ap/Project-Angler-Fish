@@ -63,7 +63,7 @@ def _run_picamera2():
             av_frame.pts = frame_count
             packets = codec.encode(av_frame)
             for packet in packets:
-                srv.sendto(packet.to_bytes(), client_addr)
+                srv.sendto(bytes(packet), client_addr)
 
             frame_count += 1
             elapsed = time.time() - start_time
@@ -75,7 +75,6 @@ def _run_picamera2():
     except Exception as e:
         print(f"[sub_camera] Error: {e}")
     finally:
-        codec.close()
         srv.close()
 
 
