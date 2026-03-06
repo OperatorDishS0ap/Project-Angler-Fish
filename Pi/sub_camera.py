@@ -13,10 +13,6 @@ HEIGHT = 720
 FPS = 100
 JPEG_QUALITY = 75
 
-# Fallback (USB cam) if picamera2 isn't installed
-USB_CAM_INDEX = 0
-
-
 def _run_picamera2():
     from picamera2 import Picamera2
 
