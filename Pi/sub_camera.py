@@ -10,8 +10,8 @@ gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GstRtspServer, GLib
 
 # streaming parameters
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 1920
+HEIGHT = 1080
 FPS = 30
 BITRATE = 2500000  # bps
 VFLIP = True
