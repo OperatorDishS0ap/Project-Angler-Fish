@@ -1,9 +1,9 @@
 import socket
-import struct
 import time
 from fractions import Fraction
 import cv2
 import av
+from picamera2 import Picamera2
 
 
 HOST = "0.0.0.0"
@@ -16,11 +16,9 @@ FPS = 100
 JPEG_QUALITY = 75
 
 def _run_picamera2():
-    from picamera2 import Picamera2
-
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
-        main={"size": (WIDTH, HEIGHT), "format": "RGB888"},
+        main={"size": (WIDTH, HEIGHT), "format": "BGR888"},
         controls={"FrameRate": FPS},
     )
     picam2.configure(config)
