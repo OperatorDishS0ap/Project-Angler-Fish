@@ -6,12 +6,13 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import av
 
 
 class CameraClient:
     """
-    Receives a JPEG stream over TCP:
-      [4-byte big-endian length][JPEG bytes]...
+    Receives a H.264 stream over UDP:
+    Sends HELLO to server, then receives H.264 packets and decodes to frames.
     """
     def __init__(self, host: str, port: int = 8000, reconnect: bool = True):
         self.host = host
@@ -25,6 +26,8 @@ class CameraClient:
         self._lock = threading.Lock()
         self._latest_frame: Optional[np.ndarray] = None
         self._connected = False
+
+        self._codec = None
 
     @property
     def connected(self) -> bool:
@@ -43,67 +46,47 @@ class CameraClient:
         except Exception:
             pass
         self._sock = None
+        if self._codec:
+            self._codec.close()
+            self._codec = None
 
     def get_frame(self) -> Optional[np.ndarray]:
         with self._lock:
             return None if self._latest_frame is None else self._latest_frame.copy()
 
-    def _recv_exact(self, n: int) -> Optional[bytes]:
-        buf = b""
-        while len(buf) < n and not self._stop.is_set():
-            chunk = self._sock.recv(n - len(buf))
-            if not chunk:
-                return None
-            buf += chunk
-        return buf
-
-    def _connect(self) -> bool:
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5)
-            s.connect((self.host, self.port))
-            s.settimeout(None)
-            self._sock = s
-            self._connected = True
-            return True
-        except Exception:
-            self._connected = False
-            self._sock = None
-            return False
-
     def _run(self) -> None:
         while not self._stop.is_set():
-            if not self._connect():
-                if not self.reconnect:
-                    return
-                time.sleep(1.0)
-                continue
-
             try:
+                self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self._sock.settimeout(5)
+                self._sock.sendto(b'HELLO', (self.host, self.port))
+                self._sock.settimeout(None)
+                self._connected = True
+
+                # Setup H.264 decoder
+                self._codec = av.CodecContext.create('libx264', 'r')
+                self._codec.open()
+
                 while not self._stop.is_set():
-                    header = self._recv_exact(4)
-                    if header is None:
-                        break
-                    (size,) = struct.unpack(">I", header)
-                    data = self._recv_exact(size)
-                    if data is None:
-                        break
-                    jpg = np.frombuffer(data, dtype=np.uint8)
-                    frame = cv2.imdecode(jpg, cv2.IMREAD_COLOR)
-                    if frame is not None:
+                    data, addr = self._sock.recvfrom(65536)
+                    packet = av.Packet(data)
+                    frames = self._codec.decode(packet)
+                    for frame in frames:
+                        img = frame.to_ndarray(format='bgr24')
                         with self._lock:
-                            self._latest_frame = frame
-            except Exception:
-                pass
-            finally:
+                            self._latest_frame = img
+            except Exception as e:
                 self._connected = False
+                if self._codec:
+                    self._codec.close()
+                    self._codec = None
                 try:
                     if self._sock:
                         self._sock.close()
                 except Exception:
                     pass
                 self._sock = None
-                if self.reconnect:
-                    time.sleep(0.5)
+                if self.reconnect and not self._stop.is_set():
+                    time.sleep(1.0)
                 else:
                     return

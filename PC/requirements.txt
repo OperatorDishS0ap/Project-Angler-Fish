@@ -3,3 +3,4 @@ pygame
 paramiko
 numpy
 pillow
+av
