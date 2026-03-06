@@ -40,22 +40,6 @@ class SensorFactory(GstRtspServer.RTSPMediaFactory):
         print(f"[sub_camera] Pipeline: {pipeline}")
         self.set_launch(pipeline)
         self.set_shared(True)
-    
-    def do_create_element(self, url):
-        """Override to add error logging."""
-        print(f"[sub_camera] Client requesting: {url.get_request_uri()}")
-        try:
-            element = super().do_create_element(url)
-            if element:
-                print("[sub_camera] Pipeline element created successfully")
-            else:
-                print("[sub_camera] ERROR: Pipeline element is None")
-            return element
-        except Exception as e:
-            print(f"[sub_camera] ERROR creating pipeline element: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
 
 
 class GstServer:
