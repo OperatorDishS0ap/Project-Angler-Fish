@@ -59,7 +59,7 @@ class CameraClient:
             try:
                 # Hint FFmpeg backend to keep RTSP buffering minimal.
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;50000"
+                    "rtsp_transport;udp|fflags;nobuffer|flags;low_delay|max_delay;50000"
                 )
                 self._capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
                 self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
