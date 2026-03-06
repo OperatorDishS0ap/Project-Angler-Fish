@@ -12,8 +12,10 @@ from gi.repository import Gst, GstRtspServer, GLib
 # streaming parameters
 WIDTH = 1280
 HEIGHT = 720
-FPS = 60
-BITRATE = 400000  # bps
+FPS = 30
+BITRATE = 2500000  # bps
+VFLIP = True
+HFLIP = False
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
 FIFO_PATH = "/tmp/anglerfish_cam.h264"
 
@@ -33,7 +35,7 @@ def _prepare_fifo() -> None:
 
 def _build_camera_cmd(camera_tool: str) -> list[str]:
     # Hardware H.264 on Raspberry Pi camera stack.
-    return [
+    cmd = [
         camera_tool,
         "--nopreview",
         "--inline",
@@ -47,11 +49,21 @@ def _build_camera_cmd(camera_tool: str) -> list[str]:
         str(FPS),
         "--bitrate",
         str(BITRATE),
+        "--intra",
+        str(max(1, FPS)),
+        "--flush",
         "-t",
         "0",
         "-o",
         FIFO_PATH,
     ]
+
+    if VFLIP:
+        cmd.append("--vflip")
+    if HFLIP:
+        cmd.append("--hflip")
+
+    return cmd
 
 
 class StreamFactory(GstRtspServer.RTSPMediaFactory):

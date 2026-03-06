@@ -1,6 +1,7 @@
 import threading
 import time
 from typing import Optional
+import os
 
 import cv2
 import numpy as np
@@ -25,10 +26,17 @@ class CameraClient:
         self._connected = False
 
         self._capture: Optional[cv2.VideoCapture] = None
+        self._fps = 0.0
+        self._fps_count = 0
+        self._fps_last_ts = time.time()
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def fps(self) -> float:
+        return self._fps
 
     def start(self) -> None:
         self._stop.clear()
@@ -49,7 +57,12 @@ class CameraClient:
         url = f"rtsp://{self.host}:{self.port}/{self.path}"
         while not self._stop.is_set():
             try:
-                self._capture = cv2.VideoCapture(url)
+                # Hint FFmpeg backend to keep RTSP buffering minimal.
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;50000"
+                )
+                self._capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+                self._capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
                 if not self._capture.isOpened():
                     raise RuntimeError("Unable to open RTSP stream")
                 self._connected = True
@@ -60,6 +73,13 @@ class CameraClient:
                         raise RuntimeError("Frame read failed")
                     with self._lock:
                         self._latest_frame = frame
+
+                    self._fps_count += 1
+                    now = time.time()
+                    if now - self._fps_last_ts >= 1.0:
+                        self._fps = self._fps_count / (now - self._fps_last_ts)
+                        self._fps_count = 0
+                        self._fps_last_ts = now
             except Exception as e:
                 print(f"[camera] Error: {e}")
                 self._connected = False

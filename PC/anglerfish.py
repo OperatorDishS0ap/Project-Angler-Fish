@@ -237,9 +237,10 @@ class AnglerFishApp(tk.Tk):
 
         self.speed_var = tk.StringVar(value="Speed: -- m/s")
         self.accel_var = tk.StringVar(value="Accel: -- m/s²")
+        self.video_fps_var = tk.StringVar(value="Video FPS: --")
 
         ttk.Label(side, text="Motion Data", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=4)
-        for v in [self.speed_var, self.accel_var]:
+        for v in [self.speed_var, self.accel_var, self.video_fps_var]:
             ttk.Label(side, textvariable=v, font=("Segoe UI", 11)).pack(anchor="w", pady=2)
 
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
@@ -361,6 +362,7 @@ class AnglerFishApp(tk.Tk):
 
             if self.camera_client:
                 frame = self.camera_client.get_frame()
+                self.video_fps_var.set(f"Video FPS: {self.camera_client.fps:.1f}")
                 if frame is not None:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     img = Image.fromarray(frame)
