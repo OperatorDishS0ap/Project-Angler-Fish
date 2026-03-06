@@ -108,7 +108,7 @@ class MotorCommand:
         return (self.m1 * 100.0, self.m2 * 100.0, self.m3 * 100.0, self.m4 * 100.0, a_flag_pct)
 
 class MotorUdpSender:
-    """Sends the legacy binary packet: <4s I 4h."""
+    """Sends the legacy binary packet: <4s I 5h."""
     def __init__(self, pi_ip: str, pi_port: int = 9000, rate_hz: float = 30.0):
         self.pi_ip = pi_ip
         self.pi_port = pi_port
@@ -118,6 +118,7 @@ class MotorUdpSender:
         self._thread: Optional[threading.Thread] = None
         self._seq = 0
         self.latest_cmd = MotorCommand()
+        self._last_sent_values: Optional[Tuple[int, int, int, int, int]] = None
 
     def start(self) -> None:
         self._stop.clear()
@@ -147,21 +148,32 @@ class MotorUdpSender:
                 m1, m2, m3, m4 = cmd.m1, cmd.m2, cmd.m3, cmd.m4
 
             a_flag_val = 1000 if cmd.a_flag else 0
-            pkt = struct.pack(
-                CMD_FMT,
-                CMD_MAGIC,
-                self._seq,
+            encoded_values = (
                 m1_to_i16(m1),
                 m1_to_i16(m2),
                 m1_to_i16(m3),
                 m1_to_i16(m4),
                 a_flag_val,
             )
-            try:
-                self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
-                self._seq = (self._seq + 1) & 0xFFFFFFFF
-            except Exception:
-                pass
+
+            # Send only when the command changes; Pi holds the previous command between updates.
+            if encoded_values != self._last_sent_values:
+                pkt = struct.pack(
+                    CMD_FMT,
+                    CMD_MAGIC,
+                    self._seq,
+                    encoded_values[0],
+                    encoded_values[1],
+                    encoded_values[2],
+                    encoded_values[3],
+                    encoded_values[4],
+                )
+                try:
+                    self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
+                    self._seq = (self._seq + 1) & 0xFFFFFFFF
+                    self._last_sent_values = encoded_values
+                except Exception:
+                    pass
             time.sleep(dt)
 
 class XboxControllerReader:

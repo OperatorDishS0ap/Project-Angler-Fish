@@ -38,7 +38,6 @@ AVOID_HI = 1514
 FORWARD_START = AVOID_HI + 1  # 1601
 
 ARM_TIME_S = 3.0
-COMMAND_TIMEOUT_S = 0.5
 LOOP_SLEEP_S = 0.005
 
 # Small command deadband: treat tiny commands as neutral
@@ -128,7 +127,6 @@ def main():
     sock.bind((LISTEN_IP, LISTEN_PORT))
     sock.settimeout(SOCK_TIMEOUT_S)
 
-    last_rx = time.time()
     last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
     arm_requested = False
     arm_active = False
@@ -160,7 +158,7 @@ def main():
                         "m4": i16_to_pct(m4_i16),
                     }
                     arm_requested = arm_i16 > 0
-                    last_rx = time.time()
+
                 else:
                     # JSON fallback
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
@@ -171,17 +169,12 @@ def main():
                         "m4": float(msg.get("m4", last["m4"])),
                     }
                     arm_requested = bool(msg.get("arm", arm_requested))
-                    last_rx = time.time()
+
 
             except socket.timeout:
                 pass
             except Exception:
                 pass
-
-            # Failsafe -> neutral
-            if time.time() - last_rx > COMMAND_TIMEOUT_S:
-                last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
-                arm_requested = False
 
             # Arm/disarm state machine for ESC safety.
             if not arm_requested:
