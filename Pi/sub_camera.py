@@ -1,31 +1,38 @@
+import os
 import shutil
 import subprocess
 import sys
+
+import gi
+
+gi.require_version("Gst", "1.0")
+gi.require_version("GstRtspServer", "1.0")
+from gi.repository import Gst, GstRtspServer, GLib
 
 # streaming parameters
 WIDTH = 640
 HEIGHT = 480
 FPS = 20
 BITRATE = 400000  # bps
-RTSP_URL = "rtsp://0.0.0.0:8554/stream"
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
+FIFO_PATH = "/tmp/anglerfish_cam.h264"
 
 
 def _find_camera_tool() -> str:
-    # Newer Raspberry Pi OS uses rpicam-vid; older uses libcamera-vid.
     for name in ("rpicam-vid", "libcamera-vid"):
         if shutil.which(name):
             return name
     raise RuntimeError("Missing required camera tool: rpicam-vid/libcamera-vid")
 
 
-def _require_tool(name: str) -> None:
-    if shutil.which(name) is None:
-        raise RuntimeError(f"Missing required tool: {name}")
+def _prepare_fifo() -> None:
+    if os.path.exists(FIFO_PATH):
+        os.remove(FIFO_PATH)
+    os.mkfifo(FIFO_PATH)
 
 
-def _build_libcamera_cmd(camera_tool: str) -> list[str]:
-    # libcamera-vid uses Pi hardware H.264 encoder.
+def _build_camera_cmd(camera_tool: str) -> list[str]:
+    # Hardware H.264 on Raspberry Pi camera stack.
     return [
         camera_tool,
         "--nopreview",
@@ -43,85 +50,64 @@ def _build_libcamera_cmd(camera_tool: str) -> list[str]:
         "-t",
         "0",
         "-o",
-        "-",
+        FIFO_PATH,
     ]
 
 
-def _build_ffmpeg_cmd() -> list[str]:
-    # FFmpeg receives Annex-B H.264 and serves it via RTSP in listen mode.
-    return [
-        "ffmpeg",
-        "-loglevel",
-        "info",
-        "-fflags",
-        "nobuffer",
-        "-flags",
-        "low_delay",
-        "-f",
-        "h264",
-        "-i",
-        "-",
-        "-an",
-        "-c:v",
-        "copy",
-        "-muxdelay",
-        "0.1",
-        "-f",
-        "rtsp",
-        "-rtsp_transport",
-        "tcp",
-        "-listen",
-        "1",
-        RTSP_URL,
-    ]
+class StreamFactory(GstRtspServer.RTSPMediaFactory):
+    def __init__(self):
+        super().__init__()
+        launch = (
+            f"filesrc location={FIFO_PATH} do-timestamp=true ! "
+            "h264parse config-interval=1 ! "
+            "rtph264pay name=pay0 pt=96 config-interval=1"
+        )
+        print(f"[sub_camera] RTSP pipeline: {launch}")
+        self.set_launch(launch)
+        self.set_shared(True)
 
 
 def main() -> None:
     try:
         camera_tool = _find_camera_tool()
-        _require_tool("ffmpeg")
     except Exception as e:
         print(f"[sub_camera] ERROR: {e}")
-        print("[sub_camera] Install: sudo apt install ffmpeg libcamera-apps rpicam-apps")
+        print("[sub_camera] Install: sudo apt install libcamera-apps rpicam-apps gir1.2-gst-rtsp-server-1.0")
         sys.exit(1)
 
-    cam_cmd = _build_libcamera_cmd(camera_tool)
-    ff_cmd = _build_ffmpeg_cmd()
+    _prepare_fifo()
+    Gst.init(None)
+
+    cam_cmd = _build_camera_cmd(camera_tool)
     print(f"[sub_camera] Using hardware H.264 via {camera_tool}")
-    print(f"[sub_camera] RTSP server bind: {RTSP_URL}")
     print(f"[sub_camera] Connect from PC: {RTSP_DISPLAY_URL}")
-    print(f"[sub_camera] ffmpeg cmd: {' '.join(ff_cmd)}")
+    print(f"[sub_camera] Camera cmd: {' '.join(cam_cmd)}")
 
     cam_proc = None
-    ff_proc = None
     try:
-        cam_proc = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        ff_proc = subprocess.Popen(ff_cmd, stdin=cam_proc.stdout, stderr=subprocess.PIPE, text=True)
+        # Start RTSP server first so clients can connect immediately.
+        server = GstRtspServer.RTSPServer()
+        mounts = server.get_mount_points()
+        mounts.add_factory("/stream", StreamFactory())
+        server.attach(None)
+        print("[sub_camera] RTSP server started on 0.0.0.0:8554")
 
-        # Ensure only ffmpeg owns the camera stdout pipe.
-        if cam_proc.stdout is not None:
-            cam_proc.stdout.close()
+        # Start camera process that writes H.264 Annex-B to FIFO.
+        cam_proc = subprocess.Popen(cam_cmd)
 
-        # Wait until one process exits.
-        ff_rc = ff_proc.wait()
-        if ff_proc.stderr is not None:
-            ff_err = ff_proc.stderr.read().strip()
-            if ff_err:
-                print(f"[sub_camera] ffmpeg stderr:\n{ff_err}")
-        cam_rc = cam_proc.poll()
-        print(f"[sub_camera] ffmpeg exited rc={ff_rc}, libcamera rc={cam_rc}")
+        loop = GLib.MainLoop()
+        loop.run()
     except KeyboardInterrupt:
         print("[sub_camera] Shutting down")
     finally:
-        for proc in (ff_proc, cam_proc):
-            if proc is not None and proc.poll() is None:
-                proc.terminate()
-        for proc in (ff_proc, cam_proc):
-            if proc is not None:
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    proc.kill()
+        if cam_proc is not None and cam_proc.poll() is None:
+            cam_proc.terminate()
+            try:
+                cam_proc.wait(timeout=2)
+            except Exception:
+                cam_proc.kill()
+        if os.path.exists(FIFO_PATH):
+            os.remove(FIFO_PATH)
 
 
 if __name__ == "__main__":
