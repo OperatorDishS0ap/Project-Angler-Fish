@@ -7,7 +7,8 @@ WIDTH = 640
 HEIGHT = 480
 FPS = 20
 BITRATE = 400000  # bps
-RTSP_URL = "rtsp://0.0.0.0:8554/stream"
+RTSP_URL = "rtsp://0.0.0.0:8554/stream?listen=1"
+RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
 
 
 def _find_camera_tool() -> str:
@@ -63,6 +64,8 @@ def _build_ffmpeg_cmd() -> list[str]:
         "-an",
         "-c:v",
         "copy",
+        "-muxdelay",
+        "0.1",
         "-f",
         "rtsp",
         "-rtsp_transport",
@@ -85,7 +88,8 @@ def main() -> None:
     cam_cmd = _build_libcamera_cmd(camera_tool)
     ff_cmd = _build_ffmpeg_cmd()
     print(f"[sub_camera] Using hardware H.264 via {camera_tool}")
-    print(f"[sub_camera] RTSP server: {RTSP_URL}")
+    print(f"[sub_camera] RTSP server bind: {RTSP_URL}")
+    print(f"[sub_camera] Connect from PC: {RTSP_DISPLAY_URL}")
 
     cam_proc = None
     ff_proc = None
