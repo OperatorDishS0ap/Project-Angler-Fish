@@ -21,11 +21,15 @@ class UdpOutput(Output):
         self.socket = socket
         self.addr = addr
         self.packets_sent = 0
+        self.max_udp_size = 65000  # Safe UDP packet size limit
 
     def outputframe(self, frame, keyframe=None, timestamp=None, packet=None, audio=None):
         if frame:
-            self.socket.sendto(frame, self.addr)
-            self.packets_sent += 1
+            # Split large frames into smaller UDP packets
+            for i in range(0, len(frame), self.max_udp_size):
+                chunk = frame[i:i + self.max_udp_size]
+                self.socket.sendto(chunk, self.addr)
+                self.packets_sent += 1
 
 def _run_picamera2():
     picam2 = Picamera2()
