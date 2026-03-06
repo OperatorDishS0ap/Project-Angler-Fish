@@ -7,7 +7,7 @@ WIDTH = 640
 HEIGHT = 480
 FPS = 20
 BITRATE = 400000  # bps
-RTSP_URL = "rtsp://0.0.0.0:8554/stream?listen=1"
+RTSP_URL = "rtsp://0.0.0.0:8554/stream"
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
 
 
@@ -52,7 +52,7 @@ def _build_ffmpeg_cmd() -> list[str]:
     return [
         "ffmpeg",
         "-loglevel",
-        "warning",
+        "info",
         "-fflags",
         "nobuffer",
         "-flags",
@@ -70,8 +70,8 @@ def _build_ffmpeg_cmd() -> list[str]:
         "rtsp",
         "-rtsp_transport",
         "tcp",
-        "-rtsp_flags",
-        "listen",
+        "-listen",
+        "1",
         RTSP_URL,
     ]
 
@@ -90,12 +90,13 @@ def main() -> None:
     print(f"[sub_camera] Using hardware H.264 via {camera_tool}")
     print(f"[sub_camera] RTSP server bind: {RTSP_URL}")
     print(f"[sub_camera] Connect from PC: {RTSP_DISPLAY_URL}")
+    print(f"[sub_camera] ffmpeg cmd: {' '.join(ff_cmd)}")
 
     cam_proc = None
     ff_proc = None
     try:
         cam_proc = subprocess.Popen(cam_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        ff_proc = subprocess.Popen(ff_cmd, stdin=cam_proc.stdout)
+        ff_proc = subprocess.Popen(ff_cmd, stdin=cam_proc.stdout, stderr=subprocess.PIPE, text=True)
 
         # Ensure only ffmpeg owns the camera stdout pipe.
         if cam_proc.stdout is not None:
@@ -103,6 +104,10 @@ def main() -> None:
 
         # Wait until one process exits.
         ff_rc = ff_proc.wait()
+        if ff_proc.stderr is not None:
+            ff_err = ff_proc.stderr.read().strip()
+            if ff_err:
+                print(f"[sub_camera] ffmpeg stderr:\n{ff_err}")
         cam_rc = cam_proc.poll()
         print(f"[sub_camera] ffmpeg exited rc={ff_rc}, libcamera rc={cam_rc}")
     except KeyboardInterrupt:
