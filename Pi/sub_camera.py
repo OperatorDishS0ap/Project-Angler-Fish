@@ -1,10 +1,7 @@
 """RTSP server for H.264 video using GStreamer.
 
-Replaces the previous UDP-based streaming approach. A hardware H.264
-encoder (4l2h264enc) is driven directly from the Pi camera and streamed
-over RTSP using gst-rtsp-server. Clients can connect to
-
-tsp://<pi-ip>:8554/stream.
+Uses libcamerasrc on Raspberry Pi and serves an RTSP stream at:
+rtsp://<pi-ip>:8554/stream
 
 Dependencies: 
     python3-gi
@@ -23,9 +20,6 @@ gi.require_version("Gst", "1.0")
 gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GstRtspServer, GLib
 
-# initialize GStreamer
-Gst.init(None)
-
 # streaming parameters
 WIDTH = 640
 HEIGHT = 480
@@ -36,10 +30,11 @@ BITRATE = 500000  # 500 kbps
 class SensorFactory(GstRtspServer.RTSPMediaFactory):
     def __init__(self):
         super().__init__()
-        # use libcamerasrc for Raspberry Pi camera
+        # Avoid videoconvert dependency by requesting NV12 directly.
         pipeline = (
-            f"libcamerasrc ! video/x-raw,width={WIDTH},height={HEIGHT},"
-            f"framerate={FPS}/1 ! videoconvert ! v4l2h264enc bitrate={BITRATE} ! "
+            f"libcamerasrc ! video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},"
+            f"framerate={FPS}/1 ! "
+            f"v4l2h264enc extra-controls=\"controls,video_bitrate={BITRATE};\" ! "
             "rtph264pay name=pay0 pt=96"
         )
         print(f"[sub_camera] Pipeline: {pipeline}")
@@ -73,21 +68,28 @@ class GstServer:
 
 
 def main():
-    # Enable GStreamer debug output
     import os
     os.environ['GST_DEBUG'] = '2'  # 0=none, 1=ERROR, 2=WARNING, 3=INFO, 4=DEBUG
+    Gst.init(None)
     
-    print("[sub_camera] Checking GStreamer plugins...")
+    print("[sub_camera] Checking GStreamer components...")
     registry = Gst.Registry.get()
-    
-    # Check for required plugins
-    required_plugins = ['libcamera', 'video4linux2', 'videoconvert', 'rtp']
+
+    required_plugins = ['libcamera', 'video4linux2', 'rtp']
     for plugin_name in required_plugins:
         plugin = registry.find_plugin(plugin_name)
         if plugin:
             print(f"[sub_camera] ✓ {plugin_name} plugin found")
         else:
             print(f"[sub_camera] ✗ {plugin_name} plugin NOT found")
+
+    # videoconvert is an element factory (from videoconvertscale), not a plugin name.
+    for elem in ["libcamerasrc", "v4l2h264enc", "rtph264pay"]:
+        factory = Gst.ElementFactory.find(elem)
+        if factory:
+            print(f"[sub_camera] ✓ {elem} element found")
+        else:
+            print(f"[sub_camera] ✗ {elem} element NOT found")
     
     server = GstServer()
     loop = GLib.MainLoop()
