@@ -50,6 +50,7 @@ def _run_picamera2():
     frame_count = 0
     start_time = time.time()
     actual_fps = 0
+    packets_sent = 0
     try:
         while True:
             frame = picam2.capture_array()  # RGB888
@@ -62,12 +63,15 @@ def _run_picamera2():
             packets = codec.encode(av_frame)
             for packet in packets:
                 srv.sendto(bytes(packet), client_addr)
+                packets_sent += 1
 
             frame_count += 1
             elapsed = time.time() - start_time
             if elapsed >= 1:  # Update FPS every 1 second
                 actual_fps = frame_count / elapsed
+                print(f"[sub_camera] FPS: {actual_fps:.1f}, Packets sent: {packets_sent}")
                 frame_count = 0
+                packets_sent = 0
                 start_time = time.time()
             # Note: No sleep needed as picamera2 controls frame rate
     except Exception as e:
