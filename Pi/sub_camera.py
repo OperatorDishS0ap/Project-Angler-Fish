@@ -22,7 +22,7 @@ class UdpOutput(Output):
         self.addr = addr
         self.packets_sent = 0
 
-    def outputframe(self, frame, keyframe=True, timestamp=None):
+    def outputframe(self, frame, keyframe=None, timestamp=None, packet=None, audio=None):
         if frame:
             self.socket.sendto(frame, self.addr)
             self.packets_sent += 1
