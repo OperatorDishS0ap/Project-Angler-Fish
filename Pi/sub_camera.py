@@ -23,8 +23,8 @@ from gi.repository import Gst, GstRtspServer, GLib
 # streaming parameters
 WIDTH = 640
 HEIGHT = 480
-FPS = 30
-BITRATE = 500000  # 500 kbps
+FPS = 20
+BITRATE = 400000  # 400 kbps
 
 
 class SensorFactory(GstRtspServer.RTSPMediaFactory):
@@ -46,26 +46,15 @@ class GstServer:
 
 def _choose_pipeline() -> str:
     has_v4l2 = Gst.ElementFactory.find("v4l2h264enc") is not None
-    has_v4l2convert = Gst.ElementFactory.find("v4l2convert") is not None
 
     if has_v4l2:
         print("[sub_camera] Using v4l2h264enc (hardware)")
-        if has_v4l2convert:
-            # Convert NV21 (libcamerasrc default here) to NV12 for the encoder.
-            # Use default io-mode to avoid dmabuf-import failures on some Pi stacks.
-            return (
-                f"libcamerasrc ! video/x-raw,format=NV21,width={WIDTH},height={HEIGHT},framerate={FPS}/1 ! "
-                "v4l2convert ! "
-                "video/x-raw,format=NV12 ! "
-                f"v4l2h264enc extra-controls=\"controls,video_bitrate={BITRATE},repeat_sequence_header=1,h264_profile=4;\" ! "
-                "h264parse config-interval=1 ! "
-                "rtph264pay name=pay0 pt=96 config-interval=1"
-            )
-
-        # Fallback hardware path when v4l2convert is unavailable.
+        # Conservative hardware path: avoid v4l2convert import issues and force mmap io-mode.
         return (
             f"libcamerasrc ! video/x-raw,format=NV12,width={WIDTH},height={HEIGHT},framerate={FPS}/1 ! "
-            f"v4l2h264enc extra-controls=\"controls,video_bitrate={BITRATE},repeat_sequence_header=1,h264_profile=4;\" ! "
+            "queue max-size-buffers=6 leaky=downstream ! "
+            f"v4l2h264enc output-io-mode=mmap capture-io-mode=mmap "
+            f"extra-controls=\"controls,video_bitrate={BITRATE},video_bitrate_mode=1,repeat_sequence_header=1,h264_i_frame_period={FPS};\" ! "
             "h264parse config-interval=1 ! "
             "rtph264pay name=pay0 pt=96 config-interval=1"
         )
@@ -89,7 +78,7 @@ def main():
         else:
             print(f"[sub_camera] ✗ {plugin_name} plugin NOT found")
 
-    for elem in ["libcamerasrc", "v4l2convert", "v4l2h264enc", "h264parse", "rtph264pay"]:
+    for elem in ["libcamerasrc", "queue", "v4l2h264enc", "h264parse", "rtph264pay"]:
         factory = Gst.ElementFactory.find(elem)
         if factory:
             print(f"[sub_camera] ✓ {elem} element found")
