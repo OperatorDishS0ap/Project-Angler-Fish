@@ -10,10 +10,10 @@ HOST = "0.0.0.0"
 PORT = 8000
 
 # Streaming settings
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 640
+HEIGHT = 480
 FPS = 30
-BITRATE = 2000000  # 2 Mbps
+BITRATE = 500000  # Reduced from 2Mbps to 500kbps to fit in UDP packets
 
 class UdpOutput(Output):
     def __init__(self, socket, addr):
@@ -25,11 +25,20 @@ class UdpOutput(Output):
 
     def outputframe(self, frame, keyframe=None, timestamp=None, packet=None, audio=None):
         if frame:
-            # Split large frames into smaller UDP packets
-            for i in range(0, len(frame), self.max_udp_size):
-                chunk = frame[i:i + self.max_udp_size]
-                self.socket.sendto(chunk, self.addr)
+            # Debug: print frame size
+            print(f"[sub_camera] Frame size: {len(frame)} bytes")
+            
+            # If frame fits in single UDP packet, send as-is
+            if len(frame) <= self.max_udp_size:
+                self.socket.sendto(frame, self.addr)
                 self.packets_sent += 1
+            else:
+                # Split large frames (this may break NAL units - not ideal)
+                print(f"[sub_camera] Splitting large frame: {len(frame)} bytes")
+                for i in range(0, len(frame), self.max_udp_size):
+                    chunk = frame[i:i + self.max_udp_size]
+                    self.socket.sendto(chunk, self.addr)
+                    self.packets_sent += 1
 
 def _run_picamera2():
     picam2 = Picamera2()
