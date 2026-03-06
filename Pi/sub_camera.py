@@ -1,9 +1,9 @@
 import socket
 import time
-from fractions import Fraction
-import cv2
-import av
+import io
 from picamera2 import Picamera2
+from picamera2.encoders import H264Encoder
+from picamera2.outputs import CircularOutput
 
 
 HOST = "0.0.0.0"
@@ -12,18 +12,16 @@ PORT = 8000
 # Streaming settings
 WIDTH = 1280
 HEIGHT = 720
-FPS = 30  # Reduced from 100 - software H.264 encoding is slow
-JPEG_QUALITY = 75
+FPS = 30
+BITRATE = 2000000  # 2 Mbps
 
 def _run_picamera2():
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
-        main={"size": (WIDTH, HEIGHT), "format": "BGR888"},
+        main={"size": (WIDTH, HEIGHT), "format": "RGB888"},
         controls={"FrameRate": FPS},
     )
     picam2.configure(config)
-    picam2.start()
-    time.sleep(0.2)
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     srv.bind((HOST, PORT))
@@ -38,47 +36,44 @@ def _run_picamera2():
             print(f"[sub_camera] Client connected: {addr}")
             break
 
-    # Setup H.264 encoder
-    codec = av.CodecContext.create('libx264', 'w')
-    codec.width = WIDTH
-    codec.height = HEIGHT
-    codec.pix_fmt = 'yuv420p'
-    codec.time_base = Fraction(1, FPS)
-    codec.bit_rate = 2000000  # 2 Mbps bitrate
-    codec.options = {'preset': 'ultrafast', 'crf': '28'}  # Fast encoding, reasonable quality
-    codec.gop_size = 30  # Keyframe every 30 frames
-    codec.open()
+    # Custom output that sends H.264 packets via UDP
+    class UdpOutput:
+        def __init__(self, socket, addr):
+            self.socket = socket
+            self.addr = addr
+            self.packets_sent = 0
+
+        def write(self, data):
+            if data:
+                self.socket.sendto(data, self.addr)
+                self.packets_sent += 1
+
+        def flush(self):
+            pass
+
+    # Setup hardware H.264 encoder
+    output = UdpOutput(srv, client_addr)
+    encoder = H264Encoder(bitrate=BITRATE)
+    picam2.start_recording(encoder, output)
+    
+    print(f"[sub_camera] Started hardware H.264 encoding at {WIDTH}x{HEIGHT}@{FPS}fps")
 
     frame_count = 0
     start_time = time.time()
-    actual_fps = 0
     packets_sent = 0
     try:
         while True:
-            frame = picam2.capture_array()  # RGB888
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            frame_bgr = cv2.flip(frame_bgr, 0)  # Flip vertically
-
-            # Encode to H.264
-            av_frame = av.VideoFrame.from_ndarray(frame_bgr, format='bgr24')
-            av_frame.pts = frame_count
-            packets = codec.encode(av_frame)
-            for packet in packets:
-                srv.sendto(bytes(packet), client_addr)
-                packets_sent += 1
-
-            frame_count += 1
+            time.sleep(1.0)
+            packets_sent = output.packets_sent
+            output.packets_sent = 0
             elapsed = time.time() - start_time
-            if elapsed >= 1:  # Update FPS every 1 second
-                actual_fps = frame_count / elapsed
-                print(f"[sub_camera] FPS: {actual_fps:.1f}, Packets sent: {packets_sent}")
-                frame_count = 0
-                packets_sent = 0
+            if elapsed >= 1:
+                print(f"[sub_camera] Packets sent: {packets_sent}")
                 start_time = time.time()
-            # Note: No sleep needed as picamera2 controls frame rate
     except Exception as e:
         print(f"[sub_camera] Error: {e}")
     finally:
+        picam2.stop_recording()
         srv.close()
 
 
