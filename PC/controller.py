@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import struct
@@ -31,6 +32,17 @@ ROLL_MAX = 0.3
 PITCH_MAX = 0.3
 YAW_MAX  = 0.3
 a_flag = False
+
+
+def get_mix_limits_pct() -> Tuple[float, float, float]:
+    return (ROLL_MAX * 100.0, PITCH_MAX * 100.0, YAW_MAX * 100.0)
+
+
+def set_mix_limits_pct(roll_pct: float, pitch_pct: float, yaw_pct: float) -> None:
+    global ROLL_MAX, PITCH_MAX, YAW_MAX
+    ROLL_MAX = clamp(float(roll_pct) / 100.0, 0.0, 1.0)
+    PITCH_MAX = clamp(float(pitch_pct) / 100.0, 0.0, 1.0)
+    YAW_MAX = clamp(float(yaw_pct) / 100.0, 0.0, 1.0)
 
 
 def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: Tuple[int, int, int, int]) -> Tuple[float, float, float, float, float]:
@@ -135,6 +147,18 @@ class MotorUdpSender:
 
     def set_target(self, cmd: MotorCommand) -> None:
         self.latest_cmd = cmd
+
+    def send_tuning(self, pulse_min_us: int, pulse_max_us: int) -> None:
+        msg = {
+            "type": "tune",
+            "pulse_min_us": int(pulse_min_us),
+            "pulse_max_us": int(pulse_max_us),
+        }
+        try:
+            payload = json.dumps(msg).encode("utf-8")
+            self._sock.sendto(payload, (self.pi_ip, self.pi_port))
+        except Exception:
+            pass
 
     def _run(self) -> None:
         dt = 1.0 / max(1.0, self.rate_hz)

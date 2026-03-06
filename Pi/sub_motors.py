@@ -62,20 +62,23 @@ def i16_to_pct(v_i16: int) -> float:
     return clamp((float(v_i16) / 1000.0) * 100.0, -100.0, 100.0)
 
 
-def pct_to_pulse_us(pct: float) -> int:
+def pct_to_pulse_us(pct: float, pulse_min_us: int, pulse_max_us: int) -> int:
     pct = clamp(pct, -100.0, 100.0)
 
     if abs(pct) <= PCT_DEADBAND:
         return PULSE_NEUTRAL
 
+    pulse_min_us = int(clamp(pulse_min_us, 1000, PULSE_NEUTRAL - 1))
+    pulse_max_us = int(clamp(pulse_max_us, FORWARD_START, 2000))
+
     if pct < 0:
         # Reverse: -100 => 800, 0 => 1500
         # Linear map: pulse = 1500 + (1500-800)*(pct/100)
-        return int(PULSE_NEUTRAL + (PULSE_NEUTRAL - PULSE_MIN) * (pct / 100.0))
+        return int(PULSE_NEUTRAL + (PULSE_NEUTRAL - pulse_min_us) * (pct / 100.0))
 
     # Forward: +0 => 1601, +100 => 2100
     # Linear map: pulse = 1601 + (2100-1601)*(pct/100)
-    return int(FORWARD_START + (PULSE_MAX - FORWARD_START) * (pct / 100.0))
+    return int(FORWARD_START + (pulse_max_us - FORWARD_START) * (pct / 100.0))
 
 
 def setup_pwm_esc(pi: pigpio.pi, gpio: int):
@@ -92,14 +95,16 @@ def setup_pwm_esc(pi: pigpio.pi, gpio: int):
     pi.set_PWM_dutycycle(gpio, PULSE_NEUTRAL)
 
 
-def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int):
+def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pulse_max_us: int):
     pulse_us = int(pulse_us)
 
     # Avoid creep zone (1501..1600)
     if AVOID_LO < pulse_us <= AVOID_HI:
         pulse_us = PULSE_NEUTRAL
 
-    pulse_us = clamp(pulse_us, PULSE_MIN, PULSE_MAX)
+    pulse_min_us = int(clamp(pulse_min_us, 1000, PULSE_NEUTRAL - 1))
+    pulse_max_us = int(clamp(pulse_max_us, FORWARD_START, 2000))
+    pulse_us = clamp(pulse_us, pulse_min_us, pulse_max_us)
     pi.set_PWM_dutycycle(gpio, pulse_us)
 
 
@@ -131,6 +136,8 @@ def main():
     arm_requested = False
     arm_active = False
     arm_started_at = None
+    pulse_min_us = PULSE_MIN
+    pulse_max_us = PULSE_MAX
 
     print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
 
@@ -162,13 +169,25 @@ def main():
                 else:
                     # JSON fallback
                     msg = json.loads(data.decode("utf-8", errors="ignore"))
-                    last = {
-                        "m1": float(msg.get("m1", last["m1"])),
-                        "m2": float(msg.get("m2", last["m2"])),
-                        "m3": float(msg.get("m3", last["m3"])),
-                        "m4": float(msg.get("m4", last["m4"])),
-                    }
-                    arm_requested = bool(msg.get("arm", arm_requested))
+
+                    if msg.get("type") == "tune":
+                        if "pulse_min_us" in msg:
+                            pulse_min_us = int(clamp(float(msg["pulse_min_us"]), 1000, PULSE_NEUTRAL - 1))
+                        if "pulse_max_us" in msg:
+                            pulse_max_us = int(clamp(float(msg["pulse_max_us"]), FORWARD_START, 2000))
+
+                        if pulse_min_us >= pulse_max_us:
+                            pulse_min_us = min(pulse_min_us, PULSE_NEUTRAL - 1)
+                            pulse_max_us = max(pulse_max_us, FORWARD_START)
+                        print(f"[sub_motors_400hz] Tune update: PULSE_MIN={pulse_min_us} PULSE_MAX={pulse_max_us}")
+                    else:
+                        last = {
+                            "m1": float(msg.get("m1", last["m1"])),
+                            "m2": float(msg.get("m2", last["m2"])),
+                            "m3": float(msg.get("m3", last["m3"])),
+                            "m4": float(msg.get("m4", last["m4"])),
+                        }
+                        arm_requested = bool(msg.get("arm", arm_requested))
 
 
             except socket.timeout:
@@ -193,20 +212,20 @@ def main():
 
             # Apply outputs (PWM @ 400Hz)
             if arm_active:
-                set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"]))
-                set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"]))
-                set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"]))
-                set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"]))
+                set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
             else:
                 for g in ALL_GPIOS:
-                    set_pulse_us(pi, g, PULSE_NEUTRAL)
+                    set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
 
             time.sleep(LOOP_SLEEP_S)
 
     finally:
         # Neutral on exit
         for g in ALL_GPIOS:
-            set_pulse_us(pi, g, PULSE_NEUTRAL)
+            set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
         time.sleep(0.5)
         pi.stop()
 

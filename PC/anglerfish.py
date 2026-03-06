@@ -10,6 +10,9 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -26,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from camera import CameraClient
-from controller import XboxControllerReader, MotorUdpSender
+from controller import XboxControllerReader, MotorUdpSender, get_mix_limits_pct, set_mix_limits_pct
 from sensor import SensorUdpReceiver
 
 
@@ -71,6 +74,117 @@ class StatusBox(QWidget):
         self.label.setText(text)
 
 
+class TuneDialog(QDialog):
+    def __init__(self, parent, initial_vals: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Tune Parameters")
+        self.setModal(True)
+        self.resize(460, 300)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.pulse_min_pct = QDoubleSpinBox()
+        self.pulse_min_pct.setRange(80.0, 200.0)
+        self.pulse_min_pct.setDecimals(1)
+        self.pulse_min_pct.setSuffix(" %")
+
+        self.pulse_min_us = QDoubleSpinBox()
+        self.pulse_min_us.setRange(1000, 1499)
+        self.pulse_min_us.setDecimals(0)
+        self.pulse_min_us.setSuffix(" us")
+
+        self.pulse_max_pct = QDoubleSpinBox()
+        self.pulse_max_pct.setRange(50.0, 120.0)
+        self.pulse_max_pct.setDecimals(1)
+        self.pulse_max_pct.setSuffix(" %")
+
+        self.pulse_max_us = QDoubleSpinBox()
+        self.pulse_max_us.setRange(1601, 2000)
+        self.pulse_max_us.setDecimals(0)
+        self.pulse_max_us.setSuffix(" us")
+
+        self.roll_pct = QDoubleSpinBox()
+        self.roll_pct.setRange(0.0, 100.0)
+        self.roll_pct.setDecimals(1)
+        self.roll_pct.setSuffix(" %")
+
+        self.pitch_pct = QDoubleSpinBox()
+        self.pitch_pct.setRange(0.0, 100.0)
+        self.pitch_pct.setDecimals(1)
+        self.pitch_pct.setSuffix(" %")
+
+        self.yaw_pct = QDoubleSpinBox()
+        self.yaw_pct.setRange(0.0, 100.0)
+        self.yaw_pct.setDecimals(1)
+        self.yaw_pct.setSuffix(" %")
+
+        form.addRow("Pi PULSE_MIN (% of 1000):", self.pulse_min_pct)
+        form.addRow("Pi PULSE_MIN (us):", self.pulse_min_us)
+        form.addRow("Pi PULSE_MAX (% of 2000):", self.pulse_max_pct)
+        form.addRow("Pi PULSE_MAX (us):", self.pulse_max_us)
+        form.addRow(QLabel(""), QLabel(""))
+        form.addRow("PC ROLL_MAX:", self.roll_pct)
+        form.addRow("PC PITCH_MAX:", self.pitch_pct)
+        form.addRow("PC YAW_MAX:", self.yaw_pct)
+
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._syncing = False
+        self.pulse_min_pct.valueChanged.connect(self._on_min_pct_changed)
+        self.pulse_min_us.valueChanged.connect(self._on_min_us_changed)
+        self.pulse_max_pct.valueChanged.connect(self._on_max_pct_changed)
+        self.pulse_max_us.valueChanged.connect(self._on_max_us_changed)
+
+        self.pulse_min_us.setValue(initial_vals["pulse_min_us"])
+        self.pulse_max_us.setValue(initial_vals["pulse_max_us"])
+        self.roll_pct.setValue(initial_vals["roll_pct"])
+        self.pitch_pct.setValue(initial_vals["pitch_pct"])
+        self.yaw_pct.setValue(initial_vals["yaw_pct"])
+
+    def _on_min_pct_changed(self, pct: float):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.pulse_min_us.setValue(round((pct / 100.0) * 1000.0))
+        self._syncing = False
+
+    def _on_min_us_changed(self, us: float):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.pulse_min_pct.setValue((us / 1000.0) * 100.0)
+        self._syncing = False
+
+    def _on_max_pct_changed(self, pct: float):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.pulse_max_us.setValue(round((pct / 100.0) * 2000.0))
+        self._syncing = False
+
+    def _on_max_us_changed(self, us: float):
+        if self._syncing:
+            return
+        self._syncing = True
+        self.pulse_max_pct.setValue((us / 2000.0) * 100.0)
+        self._syncing = False
+
+    def values(self) -> dict:
+        return {
+            "pulse_min_us": int(self.pulse_min_us.value()),
+            "pulse_max_us": int(self.pulse_max_us.value()),
+            "roll_pct": float(self.roll_pct.value()),
+            "pitch_pct": float(self.pitch_pct.value()),
+            "yaw_pct": float(self.yaw_pct.value()),
+        }
+
+
 class AnglerFishApp(QMainWindow):
     status1_conn_signal = Signal(bool, str)
     status1_text_signal = Signal(str)
@@ -92,8 +206,18 @@ class AnglerFishApp(QMainWindow):
         self.pi_pass = cfg.get("pass", "raspberry")
         self.save_creds = cfg.get("save", True)
 
+        cfg_roll = float(cfg.get("roll_pct", 30.0))
+        cfg_pitch = float(cfg.get("pitch_pct", 30.0))
+        cfg_yaw = float(cfg.get("yaw_pct", 30.0))
+        set_mix_limits_pct(cfg_roll, cfg_pitch, cfg_yaw)
+
         self.running = False
         self.start_time = None
+
+        self.tune_state = {
+            "pulse_min_us": max(1000, min(1499, int(cfg.get("pulse_min_us", 1350)))),
+            "pulse_max_us": max(1601, min(2000, int(cfg.get("pulse_max_us", 1750)))),
+        }
 
         self.camera_client = None
         self.sensor_rx = None
@@ -210,13 +334,31 @@ class AnglerFishApp(QMainWindow):
         self.pi_pass_input.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
 
     def _maybe_save_creds(self):
+        cfg = load_config()
         ip = self.pi_ip_input.text()
         user = self.pi_user_input.text()
         pw = self.pi_pass_input.text()
+        cfg.update({"ip": ip, "user": user})
         if self.save_creds_check.isChecked():
-            save_config({"ip": ip, "user": user, "pass": pw, "save": True})
+            cfg.update({"pass": pw, "save": True})
         else:
-            save_config({"ip": ip, "user": user, "save": False})
+            cfg.pop("pass", None)
+            cfg.update({"save": False})
+        save_config(cfg)
+
+    def _save_tune_config(self):
+        cfg = load_config()
+        roll_pct, pitch_pct, yaw_pct = get_mix_limits_pct()
+        cfg.update(
+            {
+                "pulse_min_us": int(self.tune_state["pulse_min_us"]),
+                "pulse_max_us": int(self.tune_state["pulse_max_us"]),
+                "roll_pct": float(roll_pct),
+                "pitch_pct": float(pitch_pct),
+                "yaw_pct": float(yaw_pct),
+            }
+        )
+        save_config(cfg)
 
     def _on_update_sub(self):
         self._maybe_save_creds()
@@ -274,6 +416,9 @@ class AnglerFishApp(QMainWindow):
 
         shutdown_btn = QPushButton("Shutdown Submarine")
         shutdown_btn.clicked.connect(self._on_shutdown)
+        tune_btn = QPushButton("Tune")
+        tune_btn.clicked.connect(self._on_tune)
+        top_layout.addWidget(tune_btn)
         top_layout.addWidget(shutdown_btn)
 
         root_layout.addLayout(top_layout)
@@ -401,6 +546,7 @@ class AnglerFishApp(QMainWindow):
 
         self.motor_sender = MotorUdpSender(ip, pi_port=9000, rate_hz=30.0)
         self.motor_sender.start()
+        self.motor_sender.send_tuning(self.tune_state["pulse_min_us"], self.tune_state["pulse_max_us"])
 
     def _stop_runtime_clients(self):
         self.running = False
@@ -441,6 +587,39 @@ class AnglerFishApp(QMainWindow):
                 self.show_page1_signal.emit()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_tune(self):
+        roll_pct, pitch_pct, yaw_pct = get_mix_limits_pct()
+        initial_vals = {
+            "pulse_min_us": self.tune_state["pulse_min_us"],
+            "pulse_max_us": self.tune_state["pulse_max_us"],
+            "roll_pct": roll_pct,
+            "pitch_pct": pitch_pct,
+            "yaw_pct": yaw_pct,
+        }
+        dlg = TuneDialog(self, initial_vals)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        vals = dlg.values()
+        pulse_min_us = max(1000, min(1499, vals["pulse_min_us"]))
+        pulse_max_us = max(1601, min(2000, vals["pulse_max_us"]))
+        if pulse_min_us >= pulse_max_us:
+            self.warning_signal.emit("Tune", "PULSE_MIN must be lower than PULSE_MAX.")
+            return
+
+        set_mix_limits_pct(vals["roll_pct"], vals["pitch_pct"], vals["yaw_pct"])
+        self.tune_state["pulse_min_us"] = pulse_min_us
+        self.tune_state["pulse_max_us"] = pulse_max_us
+        self._save_tune_config()
+
+        if self.motor_sender:
+            self.motor_sender.send_tuning(pulse_min_us, pulse_max_us)
+
+        self.status2_text_signal.emit(
+            f"Tune applied: min={pulse_min_us} max={pulse_max_us} | "
+            f"roll={vals['roll_pct']:.1f}% pitch={vals['pitch_pct']:.1f}% yaw={vals['yaw_pct']:.1f}%"
+        )
 
     def _ui_loop(self):
         if self.stack.currentWidget() is self.page2:
