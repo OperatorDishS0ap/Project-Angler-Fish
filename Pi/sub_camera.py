@@ -1,6 +1,7 @@
 import socket
 import struct
 import time
+from fractions import Fraction
 import cv2
 import av
 
@@ -44,7 +45,7 @@ def _run_picamera2():
     codec.width = WIDTH
     codec.height = HEIGHT
     codec.pix_fmt = 'yuv420p'
-    codec.time_base = av.Fraction(1, FPS)
+    codec.time_base = Fraction(1, FPS)
     codec.bit_rate = 2000000  # Adjust bitrate as needed
     codec.open()
 
