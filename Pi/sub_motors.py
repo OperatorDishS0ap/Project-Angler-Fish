@@ -68,8 +68,8 @@ def pct_to_pulse_us(pct: float, pulse_min_us: int, pulse_max_us: int) -> int:
     if abs(pct) <= PCT_DEADBAND:
         return PULSE_NEUTRAL
 
-    pulse_min_us = int(clamp(pulse_min_us, 1000, PULSE_NEUTRAL - 1))
-    pulse_max_us = int(clamp(pulse_max_us, FORWARD_START, 2000))
+    pulse_min_us = int(clamp(pulse_min_us, 1000, AVOID_LO))
+    pulse_max_us = int(clamp(pulse_max_us, AVOID_HI, 2000))
 
     if pct < 0:
         # Reverse: -100 => 800, 0 => 1500
@@ -102,8 +102,8 @@ def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pul
     if AVOID_LO < pulse_us <= AVOID_HI:
         pulse_us = PULSE_NEUTRAL
 
-    pulse_min_us = int(clamp(pulse_min_us, 1000, PULSE_NEUTRAL - 1))
-    pulse_max_us = int(clamp(pulse_max_us, FORWARD_START, 2000))
+    pulse_min_us = int(clamp(pulse_min_us, 1000, AVOID_LO))
+    pulse_max_us = int(clamp(pulse_max_us, AVOID_HI, 2000))
     pulse_us = clamp(pulse_us, pulse_min_us, pulse_max_us)
     pi.set_PWM_dutycycle(gpio, pulse_us)
 
@@ -172,13 +172,13 @@ def main():
 
                     if msg.get("type") == "tune":
                         if "pulse_min_us" in msg:
-                            pulse_min_us = int(clamp(float(msg["pulse_min_us"]), 1000, PULSE_NEUTRAL - 1))
+                            pulse_min_us = int(clamp(float(msg["pulse_min_us"]), 1000, AVOID_LO))
                         if "pulse_max_us" in msg:
-                            pulse_max_us = int(clamp(float(msg["pulse_max_us"]), FORWARD_START, 2000))
+                            pulse_max_us = int(clamp(float(msg["pulse_max_us"]), AVOID_HI, 2000))
 
                         if pulse_min_us >= pulse_max_us:
-                            pulse_min_us = min(pulse_min_us, PULSE_NEUTRAL - 1)
-                            pulse_max_us = max(pulse_max_us, FORWARD_START)
+                            pulse_min_us = min(pulse_min_us, AVOID_LO)
+                            pulse_max_us = max(pulse_max_us, AVOID_HI)
                         print(f"[sub_motors_400hz] Tune update: PULSE_MIN={pulse_min_us} PULSE_MAX={pulse_max_us}")
                     else:
                         last = {

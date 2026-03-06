@@ -34,6 +34,10 @@ from sensor import SensorUdpReceiver
 
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".anglerfish_config.json")
+AVOID_LOW = 1406
+AVOID_HIGH = 1514
+PULSE_MIN_LOW = 1000
+PULSE_MAX_HIGH = 2000
 
 
 def load_config():
@@ -75,7 +79,7 @@ class StatusBox(QWidget):
 
 
 class TuneDialog(QDialog):
-    def __init__(self, parent, initial_vals: dict):
+    def __init__(self, parent, initial_vals: dict, apply_callback):
         super().__init__(parent)
         self.setWindowTitle("Tune Parameters")
         self.setModal(True)
@@ -85,22 +89,22 @@ class TuneDialog(QDialog):
         form = QFormLayout()
 
         self.pulse_min_pct = QDoubleSpinBox()
-        self.pulse_min_pct.setRange(80.0, 200.0)
+        self.pulse_min_pct.setRange(0.0, 100.0)
         self.pulse_min_pct.setDecimals(1)
         self.pulse_min_pct.setSuffix(" %")
 
         self.pulse_min_us = QDoubleSpinBox()
-        self.pulse_min_us.setRange(1000, 1499)
+        self.pulse_min_us.setRange(PULSE_MIN_LOW, AVOID_LOW)
         self.pulse_min_us.setDecimals(0)
         self.pulse_min_us.setSuffix(" us")
 
         self.pulse_max_pct = QDoubleSpinBox()
-        self.pulse_max_pct.setRange(50.0, 120.0)
+        self.pulse_max_pct.setRange(0.0, 100.0)
         self.pulse_max_pct.setDecimals(1)
         self.pulse_max_pct.setSuffix(" %")
 
         self.pulse_max_us = QDoubleSpinBox()
-        self.pulse_max_us.setRange(1601, 2000)
+        self.pulse_max_us.setRange(AVOID_HIGH, PULSE_MAX_HIGH)
         self.pulse_max_us.setDecimals(0)
         self.pulse_max_us.setSuffix(" us")
 
@@ -119,9 +123,9 @@ class TuneDialog(QDialog):
         self.yaw_pct.setDecimals(1)
         self.yaw_pct.setSuffix(" %")
 
-        form.addRow("Pi PULSE_MIN (% of 1000):", self.pulse_min_pct)
+        form.addRow("Pi PULSE_MIN (%: 1000=100, AVOID_LOW=0):", self.pulse_min_pct)
         form.addRow("Pi PULSE_MIN (us):", self.pulse_min_us)
-        form.addRow("Pi PULSE_MAX (% of 2000):", self.pulse_max_pct)
+        form.addRow("Pi PULSE_MAX (%: AVOID_HIGH=0, 2000=100):", self.pulse_max_pct)
         form.addRow("Pi PULSE_MAX (us):", self.pulse_max_us)
         form.addRow(QLabel(""), QLabel(""))
         form.addRow("PC ROLL_MAX:", self.roll_pct)
@@ -131,9 +135,13 @@ class TuneDialog(QDialog):
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        apply_btn = buttons.addButton("Apply", QDialogButtonBox.ApplyRole)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
+        apply_btn.clicked.connect(self._on_apply_clicked)
         layout.addWidget(buttons)
+
+        self._apply_callback = apply_callback
 
         self._syncing = False
         self.pulse_min_pct.valueChanged.connect(self._on_min_pct_changed)
@@ -151,29 +159,36 @@ class TuneDialog(QDialog):
         if self._syncing:
             return
         self._syncing = True
-        self.pulse_min_us.setValue(round((pct / 100.0) * 1000.0))
+        span = AVOID_LOW - PULSE_MIN_LOW
+        self.pulse_min_us.setValue(round(AVOID_LOW - ((pct / 100.0) * span)))
         self._syncing = False
 
     def _on_min_us_changed(self, us: float):
         if self._syncing:
             return
         self._syncing = True
-        self.pulse_min_pct.setValue((us / 1000.0) * 100.0)
+        span = AVOID_LOW - PULSE_MIN_LOW
+        self.pulse_min_pct.setValue(((AVOID_LOW - us) / span) * 100.0)
         self._syncing = False
 
     def _on_max_pct_changed(self, pct: float):
         if self._syncing:
             return
         self._syncing = True
-        self.pulse_max_us.setValue(round((pct / 100.0) * 2000.0))
+        span = PULSE_MAX_HIGH - AVOID_HIGH
+        self.pulse_max_us.setValue(round(AVOID_HIGH + ((pct / 100.0) * span)))
         self._syncing = False
 
     def _on_max_us_changed(self, us: float):
         if self._syncing:
             return
         self._syncing = True
-        self.pulse_max_pct.setValue((us / 2000.0) * 100.0)
+        span = PULSE_MAX_HIGH - AVOID_HIGH
+        self.pulse_max_pct.setValue(((us - AVOID_HIGH) / span) * 100.0)
         self._syncing = False
+
+    def _on_apply_clicked(self):
+        self._apply_callback(self.values())
 
     def values(self) -> dict:
         return {
@@ -215,8 +230,8 @@ class AnglerFishApp(QMainWindow):
         self.start_time = None
 
         self.tune_state = {
-            "pulse_min_us": max(1000, min(1499, int(cfg.get("pulse_min_us", 1350)))),
-            "pulse_max_us": max(1601, min(2000, int(cfg.get("pulse_max_us", 1750)))),
+            "pulse_min_us": max(PULSE_MIN_LOW, min(AVOID_LOW, int(cfg.get("pulse_min_us", 1350)))),
+            "pulse_max_us": max(AVOID_HIGH, min(PULSE_MAX_HIGH, int(cfg.get("pulse_max_us", 1750)))),
         }
 
         self.camera_client = None
@@ -597,16 +612,16 @@ class AnglerFishApp(QMainWindow):
             "pitch_pct": pitch_pct,
             "yaw_pct": yaw_pct,
         }
-        dlg = TuneDialog(self, initial_vals)
-        if dlg.exec() != QDialog.Accepted:
-            return
+        dlg = TuneDialog(self, initial_vals, self._apply_tune_values)
+        if dlg.exec() == QDialog.Accepted:
+            self._apply_tune_values(dlg.values())
 
-        vals = dlg.values()
-        pulse_min_us = max(1000, min(1499, vals["pulse_min_us"]))
-        pulse_max_us = max(1601, min(2000, vals["pulse_max_us"]))
+    def _apply_tune_values(self, vals: dict):
+        pulse_min_us = max(PULSE_MIN_LOW, min(AVOID_LOW, int(vals["pulse_min_us"])))
+        pulse_max_us = max(AVOID_HIGH, min(PULSE_MAX_HIGH, int(vals["pulse_max_us"])))
         if pulse_min_us >= pulse_max_us:
             self.warning_signal.emit("Tune", "PULSE_MIN must be lower than PULSE_MAX.")
-            return
+            return False
 
         set_mix_limits_pct(vals["roll_pct"], vals["pitch_pct"], vals["yaw_pct"])
         self.tune_state["pulse_min_us"] = pulse_min_us
@@ -620,6 +635,7 @@ class AnglerFishApp(QMainWindow):
             f"Tune applied: min={pulse_min_us} max={pulse_max_us} | "
             f"roll={vals['roll_pct']:.1f}% pitch={vals['pitch_pct']:.1f}% yaw={vals['yaw_pct']:.1f}%"
         )
+        return True
 
     def _ui_loop(self):
         if self.stack.currentWidget() is self.page2:
