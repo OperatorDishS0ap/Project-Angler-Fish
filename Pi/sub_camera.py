@@ -10,9 +10,9 @@ gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GstRtspServer, GLib
 
 # streaming parameters
-WIDTH = 640
-HEIGHT = 480
-FPS = 20
+WIDTH = 1280
+HEIGHT = 720
+FPS = 60
 BITRATE = 400000  # bps
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
 FIFO_PATH = "/tmp/anglerfish_cam.h264"
