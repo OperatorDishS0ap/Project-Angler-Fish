@@ -375,7 +375,7 @@ class AnglerFishApp(tk.Tk):
                     self.video_label.imgtk = imgtk
                     self.video_label.configure(image=imgtk, text="")
 
-        self.after(33, self._ui_loop)
+        self.after(16, self._ui_loop)
 
 
 if __name__ == "__main__":
