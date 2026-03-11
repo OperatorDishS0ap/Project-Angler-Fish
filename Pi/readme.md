@@ -21,7 +21,23 @@ sudo apt full-upgrade
 
 Install Python Packages:
 ```
-sudo apt install -y python3-opencv python3-numpy python3-gpiozero python3-picamera2
+sudo apt install -y python3-paramiko python3-numpy python3-gpiozero python3-picamera2 python3-av python3-smbus
+```
+
+Install GStreamer
+```
+sudo apt install -y \
+python3-gi \
+python3-gst-1.0 \
+gstreamer1.0-tools \
+gstreamer1.0-plugins-base \
+gstreamer1.0-plugins-good \
+gstreamer1.0-plugins-bad \
+gstreamer1.0-libav
+sudo apt install gstreamer1.0-plugins-ugly
+sudo apt install -y \
+gir1.2-gst-rtsp-server-1.0 \
+libgstrtspserver-1.0-0
 ```
 
 Install git:
