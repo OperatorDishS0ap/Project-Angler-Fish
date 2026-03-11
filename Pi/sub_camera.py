@@ -10,10 +10,10 @@ gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GstRtspServer, GLib
 
 # streaming parameters
-WIDTH = 1280
-HEIGHT = 720
+WIDTH = 720
+HEIGHT = 480
 FPS = 30
-BITRATE = 2500000  # bps
+BITRATE = 3000000  # bps
 VFLIP = True
 HFLIP = False
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"

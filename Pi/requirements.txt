@@ -1,4 +1,0 @@
-mpu6050-gyroscope-accelerometer
-pigpio
-paramiko
-av

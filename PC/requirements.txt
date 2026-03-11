@@ -1,7 +1,0 @@
-opencv-python
-pygame
-paramiko
-numpy
-pillow
-av
-PySide6
