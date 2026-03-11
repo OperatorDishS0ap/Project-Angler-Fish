@@ -13,7 +13,7 @@ from gi.repository import Gst, GstRtspServer, GLib
 WIDTH = 720
 HEIGHT = 480
 FPS = 30
-BITRATE = 3000000  # bps
+BITRATE = 2000000  # bps
 VFLIP = True
 HFLIP = False
 RTSP_DISPLAY_URL = "rtsp://<pi-ip>:8554/stream"
