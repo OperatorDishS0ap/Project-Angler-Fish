@@ -1,3 +1,4 @@
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)  
 ![Submarine](Images/Sub.jpg)
 
 # Technical Details
@@ -16,3 +17,9 @@ To promote accessibility and encourage further development, all design files, so
 
 ![flowchart](Images/flowchart.jpg)  
 ![explodedview](Images/ExplodedView.jpg)  
+
+This Project is a Student Senior Capstone Project for the University of West FLorida, Hal Marcus College of Science and Engineering  
+![UWF](Images/UWFLogo_Main.svg)  
+
+This Project was Funded and Supported by The HSU Family Educational Foundation Inc
+![HSULogo](Images/HSULogo.webp)
