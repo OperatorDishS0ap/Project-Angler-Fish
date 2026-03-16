@@ -18,7 +18,7 @@ To promote accessibility and encourage further development, all design files, so
 ![flowchart](Images/flowchart.jpg)  
 ![explodedview](Images/ExplodedView.jpg)  
 
-This Project is a Student Senior Capstone Project for the University of West FLorida, Hal Marcus College of Science and Engineering  
+This Project is a Student Senior Capstone Project for the University of West Florida, Hal Marcus College of Science and Engineering  
 ![UWF](Images/UWFLogo_Main.svg)  
 
 This Project was Funded and Supported by The HSU Family Educational Foundation Inc
