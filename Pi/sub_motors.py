@@ -14,8 +14,8 @@ SOCK_TIMEOUT_S = 0.2
 # -------------------------
 # GPIO MAP
 # -------------------------
-GPIO_M1 = 13
-GPIO_M2 = 19
+GPIO_M1 = 19
+GPIO_M2 = 13
 GPIO_M3 = 18
 GPIO_M4 = 12
 ALL_GPIOS = (GPIO_M1, GPIO_M2, GPIO_M3, GPIO_M4)
