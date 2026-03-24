@@ -216,7 +216,7 @@ class AnglerFishApp(QMainWindow):
         self.resize(1200, 700)
 
         cfg = load_config()
-        self.pi_ip = cfg.get("ip", "192.168.137.64")
+        self.pi_ip = cfg.get("ip", "anglerfish.local")
         self.pi_user = cfg.get("user", "pi")
         self.pi_pass = cfg.get("pass", "raspberry")
         self.save_creds = cfg.get("save", True)
@@ -318,7 +318,7 @@ class AnglerFishApp(QMainWindow):
         self.pi_pass_input = QLineEdit(self.pi_pass)
         self.pi_pass_input.setEchoMode(QLineEdit.Password)
 
-        form_layout.addRow("IP Address:", self.pi_ip_input)
+        form_layout.addRow("Host / IP Address:", self.pi_ip_input)
         form_layout.addRow("Username:", self.pi_user_input)
         form_layout.addRow("Password:", self.pi_pass_input)
 

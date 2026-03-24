@@ -20,8 +20,16 @@ class Telemetry:
 class SensorUdpReceiver:
     def __init__(self, listen_port: int = 9100):
         self.listen_port = listen_port
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._sock.bind(("0.0.0.0", self.listen_port))
+        try:
+            self._sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            try:
+                self._sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except OSError:
+                pass
+            self._sock.bind(("::", self.listen_port))
+        except OSError:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock.bind(("0.0.0.0", self.listen_port))
         self._sock.settimeout(1.0)
 
         self._stop = threading.Event()

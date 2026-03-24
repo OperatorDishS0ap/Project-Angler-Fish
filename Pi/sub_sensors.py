@@ -18,7 +18,7 @@ if not sensor.read():
     print("Sensor read failed!")
     exit(1)
 
-PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # set to your Windows ethernet IP
+PC_HOST = os.environ.get("ANGLERFISH_PC_HOST", "anglerfish.local")  # PC hostname or IP (IPv6/IPv4)
 PC_PORT = 9100
 RATE_HZ = 30.0
 
@@ -59,12 +59,24 @@ def _changed_enough(current, previous):
     )
 
 
+def _resolve_udp_endpoint(host: str, port: int):
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    if not infos:
+        raise RuntimeError(f"Unable to resolve host '{host}'")
+    infos.sort(key=lambda i: 0 if i[0] == socket.AF_INET6 else 1)
+    family, _socktype, _proto, _canonname, sockaddr = infos[0]
+    return family, sockaddr
+
+
 
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    family, pc_addr = _resolve_udp_endpoint(PC_HOST, PC_PORT)
+    sock = socket.socket(family, socket.SOCK_DGRAM)
     dt = 1.0 / max(1.0, RATE_HZ)
     speed = 0.0  # Integrated speed from acceleration
     GRAVITY = 9.8  # m/s²
+
+    print(f"[sub_sensors] Sending telemetry to {PC_HOST}:{PC_PORT}")
 
     pressure = 0.0
     temp_env = 0.0
@@ -151,7 +163,7 @@ def main():
             # Only publish when monitored averaged values exceed threshold deltas.
             if _changed_enough(compare_values, last_sent_values):
                 try:
-                    sock.sendto(json.dumps(avg_msg).encode("utf-8"), (PC_IP, PC_PORT))
+                    sock.sendto(json.dumps(avg_msg).encode("utf-8"), pc_addr)
                     last_sent_values = compare_values
                 except Exception:
                     pass

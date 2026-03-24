@@ -7,7 +7,7 @@ import pigpio
 # -------------------------
 # NETWORK
 # -------------------------
-LISTEN_IP = "0.0.0.0"
+LISTEN_IP = "::"
 LISTEN_PORT = 9000
 SOCK_TIMEOUT_S = 0.2
 
@@ -128,7 +128,11 @@ def main():
     time.sleep(ARM_TIME_S)
 
     # UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+    except OSError:
+        pass
     sock.bind((LISTEN_IP, LISTEN_PORT))
     sock.settimeout(SOCK_TIMEOUT_S)
 
@@ -139,7 +143,7 @@ def main():
     pulse_min_us = PULSE_MIN
     pulse_max_us = PULSE_MAX
 
-    print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
+    print(f"[sub_motors_400hz] Listening UDP on [{LISTEN_IP}]:{LISTEN_PORT}")
 
     try:
         while True:

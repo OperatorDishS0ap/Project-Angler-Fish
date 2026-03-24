@@ -18,6 +18,15 @@ pygame.init()
 CMD_FMT = "<4sI5h"
 CMD_MAGIC = b"SUB1"
 
+
+def _resolve_udp_endpoint(host: str, port: int):
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    if not infos:
+        raise RuntimeError(f"Unable to resolve host '{host}'")
+    infos.sort(key=lambda i: 0 if i[0] == socket.AF_INET6 else 1)
+    family, _socktype, _proto, _canonname, sockaddr = infos[0]
+    return family, sockaddr
+
 def clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
@@ -125,7 +134,8 @@ class MotorUdpSender:
         self.pi_ip = pi_ip
         self.pi_port = pi_port
         self.rate_hz = rate_hz
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._family, self._remote_addr = _resolve_udp_endpoint(self.pi_ip, self.pi_port)
+        self._sock = socket.socket(self._family, socket.SOCK_DGRAM)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._seq = 0
@@ -141,7 +151,7 @@ class MotorUdpSender:
         self._stop.set()
         try:
             pkt = struct.pack(CMD_FMT, CMD_MAGIC, self._seq, 0, 0, 0, 0, 0)
-            self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
+            self._sock.sendto(pkt, self._remote_addr)
         except Exception:
             pass
 
@@ -156,7 +166,7 @@ class MotorUdpSender:
         }
         try:
             payload = json.dumps(msg).encode("utf-8")
-            self._sock.sendto(payload, (self.pi_ip, self.pi_port))
+            self._sock.sendto(payload, self._remote_addr)
         except Exception:
             pass
 
@@ -193,7 +203,7 @@ class MotorUdpSender:
                     encoded_values[4],
                 )
                 try:
-                    self._sock.sendto(pkt, (self.pi_ip, self.pi_port))
+                    self._sock.sendto(pkt, self._remote_addr)
                     self._seq = (self._seq + 1) & 0xFFFFFFFF
                     self._last_sent_values = encoded_values
                 except Exception:

@@ -54,7 +54,10 @@ class CameraClient:
             return None if self._latest_frame is None else self._latest_frame.copy()
 
     def _run(self) -> None:
-        url = f"rtsp://{self.host}:{self.port}/{self.path}"
+        host = self.host.strip()
+        if ":" in host and not (host.startswith("[") and host.endswith("]")):
+            host = f"[{host}]"
+        url = f"rtsp://{host}:{self.port}/{self.path}"
         while not self._stop.is_set():
             try:
                 # Hint FFmpeg backend to keep RTSP buffering minimal.
