@@ -14,6 +14,7 @@ WIDTH = 960
 HEIGHT = 540
 FPS = 30
 BITRATE = 1_500_000
+RTSP_URL = "rtsp://anglerfish.local:8554/cam"
 
 running = True
 
