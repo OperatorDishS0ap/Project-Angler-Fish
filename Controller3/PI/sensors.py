@@ -12,7 +12,9 @@ IMU_I2C_ADDR = int(os.environ.get("ANGLERFISH_IMU_I2C_ADDR", "0x68"), 16)
 IMU_INIT_RETRIES = int(os.environ.get("ANGLERFISH_IMU_INIT_RETRIES", "5"))
 IMU_RETRY_DELAY_S = float(os.environ.get("ANGLERFISH_IMU_RETRY_DELAY_S", "0.5"))
 
-PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # set to your Windows ethernet IP
+USE_BROADCAST = os.environ.get("ANGLERFISH_USE_BROADCAST", "1") == "1"
+BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
+PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # used when ANGLERFISH_USE_BROADCAST=0
 PC_PORT = int(os.environ.get("ANGLERFISH_PC_PORT", "9001"))
 RATE_HZ = 30.0
 
@@ -86,6 +88,12 @@ def main():
         raise SystemExit("No sensors initialized (BAR30 and MPU6050 unavailable)")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if USE_BROADCAST:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    target_ip = BROADCAST_IP if USE_BROADCAST else PC_IP
+    print(f"[sensors] Telemetry target: {target_ip}:{PC_PORT} (broadcast={USE_BROADCAST})")
+
     dt = 1.0 / max(1.0, RATE_HZ)
     speed = 0.0  # Integrated speed from acceleration
     GRAVITY = 9.8  # m/s²
@@ -190,7 +198,7 @@ def main():
             # Only publish when monitored averaged values exceed threshold deltas.
             if _changed_enough(compare_values, last_sent_values):
                 try:
-                    sock.sendto(json.dumps(avg_msg).encode("utf-8"), (PC_IP, PC_PORT))
+                    sock.sendto(json.dumps(avg_msg).encode("utf-8"), (target_ip, PC_PORT))
                     last_sent_values = compare_values
                 except Exception:
                     pass
