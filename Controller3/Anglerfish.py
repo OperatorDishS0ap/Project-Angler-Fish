@@ -205,6 +205,39 @@ class UdpLinkWorker(QThread):
             "arm": True,
         }
 
+    @staticmethod
+    def _normalize_telemetry_payload(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return payload
+
+        if "telemetry" in payload and isinstance(payload.get("telemetry"), dict):
+            return payload
+
+        legacy_sensor_keys = {
+            "battery",
+            "depth",
+            "pressure",
+            "temp_pi",
+            "temp_env",
+            "temp_enclosure",
+            "speed",
+            "acceleration",
+        }
+        if legacy_sensor_keys.intersection(payload.keys()):
+            telemetry = {
+                "battery_v": float(payload.get("battery", 0.0)),
+                "depth_m": float(payload.get("depth", 0.0)),
+                "pressure_bar": float(payload.get("pressure", 0.0)),
+                "pi_temp_c": float(payload.get("temp_pi", 0.0)),
+                "water_temp_c": float(payload.get("temp_env", 0.0)),
+                "enclosure_temp_c": float(payload.get("temp_enclosure", 0.0)),
+                "speed_mps": float(payload.get("speed", 0.0)),
+                "accel_mps2": float(payload.get("acceleration", 0.0)),
+            }
+            return {"telemetry": telemetry}
+
+        return payload
+
     def send_json(self, payload: dict):
         if not self._cmd_sock:
             return
@@ -243,7 +276,7 @@ class UdpLinkWorker(QThread):
                 data, addr = self._telemetry_sock.recvfrom(8192)
                 payload = json.loads(data.decode("utf-8"))
                 if isinstance(payload, dict):
-                    self.telemetry_received.emit(payload)
+                    self.telemetry_received.emit(self._normalize_telemetry_payload(payload))
             except socket.timeout:
                 pass
             except BlockingIOError:
