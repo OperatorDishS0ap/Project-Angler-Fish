@@ -1127,18 +1127,6 @@ class MainWindow(QMainWindow):
                     local_dir=local_dir,
                     remote_dir=remote_dir,
                 )
-
-            if ok:
-                auto_ok, auto_msg = self._ensure_remote_motor_autostart(
-                    host=pi_host,
-                    user=pi_user,
-                    remote_dir=remote_dir,
-                )
-                if not auto_ok:
-                    ok = False
-                    message = auto_msg
-                else:
-                    self.log_tab.append_log("Pi autostart configured: anglerfish-motors.service")
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -1211,17 +1199,6 @@ class MainWindow(QMainWindow):
                 remote_working_dir=remote_working_dir,
                 remote_bare_repo=remote_bare_repo,
             )
-            if ok:
-                auto_ok, auto_msg = self._ensure_remote_motor_autostart(
-                    host=pi_host,
-                    user=pi_user,
-                    remote_dir=remote_working_dir,
-                )
-                if not auto_ok:
-                    ok = False
-                    message = auto_msg
-                else:
-                    self.log_tab.append_log("Pi autostart configured: anglerfish-motors.service")
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -1421,55 +1398,6 @@ class MainWindow(QMainWindow):
         if result.returncode != 0:
             return False, (result.stderr or result.stdout or "Command failed").strip()
         return True, (result.stdout or "").strip()
-
-    def _build_remote_sudo_prefix(self) -> str:
-        password = self._get_ssh_password().strip()
-        if password:
-            return f"echo {shlex.quote(password)} | sudo -S -p ''"
-        return "sudo -n"
-
-    def _ensure_remote_motor_autostart(self, host: str, user: str, remote_dir: str) -> tuple[bool, str]:
-        service_name = "anglerfish-motors.service"
-        motors_path = f"{remote_dir.rstrip('/')}/motors.py"
-        motors_path_quoted = shlex.quote(motors_path)
-        service_path = f"/etc/systemd/system/{service_name}"
-        service_path_quoted = shlex.quote(service_path)
-        sudo_prefix = self._build_remote_sudo_prefix()
-
-        service_content = (
-            "[Unit]\n"
-            "Description=AnglerFish Motors Service\n"
-            "After=network-online.target pigpiod.service\n"
-            "Wants=network-online.target pigpiod.service\n\n"
-            "[Service]\n"
-            "Type=simple\n"
-            f"WorkingDirectory={remote_dir}\n"
-            f"ExecStart=/usr/bin/python3 {motors_path}\n"
-            "Restart=always\n"
-            "RestartSec=2\n"
-            f"User={user}\n\n"
-            "[Install]\n"
-            "WantedBy=multi-user.target\n"
-        )
-
-        remote_command = (
-            f"test -f {motors_path_quoted} || {{ echo 'motors.py not found at {motors_path}'; exit 1; }}; "
-            f"{sudo_prefix} tee {service_path_quoted} >/dev/null <<'EOF'\n{service_content}EOF\n"
-            f"{sudo_prefix} systemctl daemon-reload && "
-            f"{sudo_prefix} systemctl enable pigpiod && "
-            f"{sudo_prefix} systemctl restart pigpiod && "
-            f"{sudo_prefix} systemctl enable --now {service_name} && "
-            f"{sudo_prefix} systemctl is-enabled {service_name} && "
-            f"{sudo_prefix} systemctl is-active {service_name}"
-        )
-
-        ok, output = self._run_ssh_command(user, host, remote_command)
-        if not ok:
-            return False, (
-                "Failed to configure motors autostart. Ensure sudo access on Pi (or provide Pi Password), "
-                f"then retry. Details: {output}"
-            )
-        return True, output
 
     def _run_git_push_command(self, args: list[str]) -> tuple[bool, str]:
         password = self._get_ssh_password()
