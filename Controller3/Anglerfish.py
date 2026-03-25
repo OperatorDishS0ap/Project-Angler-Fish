@@ -394,6 +394,68 @@ class UdpLinkWorker(QThread):
         self.link_state.emit("UDP link stopped")
 
 
+class PiTempWorker(QThread):
+    temp_received = Signal(float)
+    log_message = Signal(str)
+
+    def __init__(self, pi_host: str, pi_user: str, pi_password: str, parent=None):
+        super().__init__(parent)
+        self.pi_host = pi_host
+        self.pi_user = pi_user
+        self.pi_password = pi_password
+        self._running = True
+        self._last_error: Optional[str] = None
+
+    def stop(self):
+        self._running = False
+
+    def _read_pi_temp_via_paramiko(self) -> float:
+        if paramiko is None or not self.pi_password:
+            raise RuntimeError("Paramiko unavailable or password not set")
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=self.pi_host,
+                username=self.pi_user,
+                password=self.pi_password,
+                timeout=4,
+                auth_timeout=4,
+                banner_timeout=4,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            stdin, stdout, stderr = client.exec_command(
+                "cat /sys/class/thermal/thermal_zone0/temp",
+                timeout=4,
+            )
+            _ = stdin
+            raw = stdout.read().decode("utf-8", errors="replace").strip()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            if err:
+                raise RuntimeError(err)
+            return float(raw) / 1000.0
+        finally:
+            client.close()
+
+    def run(self):
+        while self._running:
+            try:
+                temp_c = self._read_pi_temp_via_paramiko()
+                self.temp_received.emit(float(temp_c))
+                self._last_error = None
+            except Exception as exc:
+                msg = str(exc)
+                if msg != self._last_error:
+                    self.log_message.emit(f"Pi temp read failed: {msg}")
+                    self._last_error = msg
+            for _ in range(20):
+                if not self._running:
+                    break
+                time.sleep(0.1)
+
+
 # ============================================================
 # Reusable widgets
 # ============================================================
@@ -643,6 +705,7 @@ class MainWindow(QMainWindow):
         self.telemetry = TelemetryData()
         self.video_worker: Optional[VideoWorker] = None
         self.udp_worker: Optional[UdpLinkWorker] = None
+        self.pi_temp_worker: Optional[PiTempWorker] = None
         self.link_ready = False
         self.controller_device = None
         self.controller_active = False
@@ -665,7 +728,7 @@ class MainWindow(QMainWindow):
         self.pi_username_edit = QLineEdit("pi")
         self.pi_password_edit = QLineEdit("")
         self.pi_password_edit.setEchoMode(QLineEdit.Password)
-        self.pi_password_edit.setPlaceholderText("SSH password (optional)")
+        self.pi_password_edit.setPlaceholderText("SSH password (required for updates)")
         self.show_password_check = QCheckBox("Show Password")
         self.pi_hostname_edit = QLineEdit("192.168.50.107")
         self.rtsp_path_edit = QLineEdit("rtsp://192.168.50.107:8554/cam")
@@ -758,8 +821,8 @@ class MainWindow(QMainWindow):
 
         right.addWidget(self.tabs)
 
-        root.addLayout(left, stretch=3)
-        root.addLayout(right, stretch=2)
+        root.addLayout(left, stretch=4)
+        root.addLayout(right, stretch=1)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -1072,6 +1135,8 @@ class MainWindow(QMainWindow):
         self.stop_links()
 
         pi_host = self.pi_hostname_edit.text().strip()
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_password = self._get_ssh_password()
         rtsp_url = self.rtsp_path_edit.text().strip()
         rtsp_host = (urlparse(rtsp_url).hostname or "").strip()
         cmd_port = self.cmd_port_spin.value()
@@ -1089,6 +1154,11 @@ class MainWindow(QMainWindow):
         self.udp_worker.link_state.connect(self.on_link_status)
         self.tuning_tab.tuning_changed.connect(self.udp_worker.update_tuning)
         self.udp_worker.start()
+
+        self.pi_temp_worker = PiTempWorker(pi_host=pi_host, pi_user=pi_user, pi_password=pi_password)
+        self.pi_temp_worker.temp_received.connect(self.on_pi_temp_update)
+        self.pi_temp_worker.log_message.connect(self.log_tab.append_log)
+        self.pi_temp_worker.start()
 
         self.connect_btn.setEnabled(False)
         self.disconnect_btn.setEnabled(True)
@@ -1111,6 +1181,11 @@ class MainWindow(QMainWindow):
             self.udp_worker.stop()
             self.udp_worker.wait(1500)
             self.udp_worker = None
+
+        if self.pi_temp_worker is not None:
+            self.pi_temp_worker.stop()
+            self.pi_temp_worker.wait(1500)
+            self.pi_temp_worker = None
 
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -1172,6 +1247,12 @@ class MainWindow(QMainWindow):
         if self.udp_worker is not None:
             self.udp_worker.update_tuning(tuning)
 
+    @Slot(float)
+    def on_pi_temp_update(self, temp_c: float):
+        self.telemetry.pi_temp_c = float(temp_c)
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
+
     def send_arm_state(self, armed: bool):
         self.controller_armed = armed
         self.telemetry.armed = armed
@@ -1207,13 +1288,18 @@ class MainWindow(QMainWindow):
             return
 
         if not pi_host:
-            QMessageBox.warning(self, "Deploy Failed", "Pi hostname is empty.")
+            QMessageBox.warning(self, "Deploy Failed", "Pi IP is empty.")
             return
 
-        if pi_password:
-            method_note = "Files will be copied directly via SFTP (password auth)."
-        else:
-            method_note = "Files will be deployed via Git push/pull (SSH key auth)."
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Deploy Failed",
+                "Pi Password is required before updating files.",
+            )
+            return
+
+        method_note = "Files will be copied directly via SFTP (password auth)."
 
         confirmation = QMessageBox.question(
             self,
@@ -1243,37 +1329,40 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            if pi_password:
-                ok, message = self._deploy_via_sftp(
-                    host=pi_host,
-                    user=pi_user,
-                    password=pi_password,
-                    local_dir=local_dir,
-                    remote_dir=remote_dir,
-                )
-            else:
-                ok, message = self._deploy_via_git(
-                    host=pi_host,
-                    user=pi_user,
-                    local_dir=local_dir,
-                    remote_dir=remote_dir,
-                )
+            ok, message = self._deploy_via_sftp(
+                host=pi_host,
+                user=pi_user,
+                password=pi_password,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+            )
         finally:
             QApplication.restoreOverrideCursor()
 
         if ok:
+            reboot_ok, reboot_message = self._reboot_pi_after_update(pi_user, pi_host)
             self.status_bar.showMessage("Deploy completed", 5000)
             self.log_tab.append_log("Deploy completed successfully")
-            QMessageBox.information(self, "Deploy Complete", "PI files were updated successfully.")
+            if reboot_ok:
+                self.log_tab.append_log("Pi reboot command sent")
+                QMessageBox.information(
+                    self,
+                    "Deploy Complete",
+                    "PI files were updated successfully. Reboot command sent to Pi.",
+                )
+            else:
+                self.log_tab.append_log(f"Deploy succeeded, but reboot failed: {reboot_message}")
+                QMessageBox.warning(
+                    self,
+                    "Deploy Complete (Reboot Failed)",
+                    "PI files were updated successfully, but auto-reboot failed.\n\n"
+                    f"Reason:\n{reboot_message}",
+                )
             return
 
         self.status_bar.showMessage("Deploy failed", 8000)
         self.log_tab.append_log(f"Deploy failed: {message}")
-        tip = (
-            "Tip: Ensure Pi Password is filled in, or set up SSH key auth and use Git deploy."
-            if not pi_password
-            else "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
-        )
+        tip = "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
         QMessageBox.critical(
             self,
             "Deploy Failed",
@@ -1297,7 +1386,7 @@ class MainWindow(QMainWindow):
             return
 
         if not pi_host:
-            QMessageBox.warning(self, "Init Failed", "Pi hostname is empty.")
+            QMessageBox.warning(self, "Init Failed", "Pi IP is empty.")
             return
 
         local_remote_url = f"ssh://{pi_user}@{pi_host}{remote_bare_repo}"
@@ -1334,13 +1423,24 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         if ok:
+            reboot_ok, reboot_message = self._reboot_pi_after_update(pi_user, pi_host)
             self.status_bar.showMessage("Git deploy initialized", 6000)
             self.log_tab.append_log("Git deploy initialized successfully")
-            QMessageBox.information(
-                self,
-                "Init Complete",
-                "Git deploy setup is complete. You can now use Deploy PI Folder via Git.",
-            )
+            if reboot_ok:
+                self.log_tab.append_log("Pi reboot command sent")
+                QMessageBox.information(
+                    self,
+                    "Init Complete",
+                    "Git deploy setup is complete. Reboot command sent to Pi.",
+                )
+            else:
+                self.log_tab.append_log(f"Git init succeeded, but reboot failed: {reboot_message}")
+                QMessageBox.warning(
+                    self,
+                    "Init Complete (Reboot Failed)",
+                    "Git deploy setup is complete, but auto-reboot failed.\n\n"
+                    f"Reason:\n{reboot_message}",
+                )
             return
 
         self.status_bar.showMessage("Git deploy init failed", 8000)
@@ -1356,7 +1456,7 @@ class MainWindow(QMainWindow):
         pi_host = self.pi_hostname_edit.text().strip()
 
         if not pi_host:
-            QMessageBox.warning(self, "Preflight Failed", "Pi hostname is empty.")
+            QMessageBox.warning(self, "Preflight Failed", "Pi IP is empty.")
             return
 
         self.status_bar.showMessage("Running Git deploy preflight check...")
@@ -1612,7 +1712,7 @@ class MainWindow(QMainWindow):
                 f"Host key mismatch for {host}. Remove/update the old key in known_hosts, then reconnect."
             )
         if "could not resolve hostname" in text or "name or service not known" in text:
-            return f"Hostname {host} could not be resolved. Check Pi Hostname or local DNS/mDNS."
+            return f"Host {host} could not be resolved. Check Pi IP or local DNS/mDNS."
         if "connection timed out" in text or "operation timed out" in text:
             return f"Connection to {host} timed out. Check network, power, and SSH service on the Pi."
         if "connection refused" in text:
@@ -1676,6 +1776,13 @@ class MainWindow(QMainWindow):
                 return False, f"{error_text}\nHint: {hint}"
             return False, error_text
         return True, (result.stdout or "").strip()
+
+    def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
+        reboot_cmd = "nohup sh -c 'sleep 1; sudo reboot' >/dev/null 2>&1 &"
+        ok, output = self._run_ssh_command(user, host, reboot_cmd)
+        if not ok:
+            return False, output
+        return True, output or "Reboot command accepted"
 
     def _initialize_git_deploy(
         self,
