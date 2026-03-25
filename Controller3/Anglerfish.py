@@ -625,7 +625,7 @@ class MainWindow(QMainWindow):
         preflight_action = QAction("Git Deploy Preflight Check", self)
         preflight_action.triggered.connect(self.git_deploy_preflight_check)
         tools_menu.addAction(preflight_action)
-        deploy_action = QAction("Deploy PI Folder via Git", self)
+        deploy_action = QAction("Deploy to Pi", self)
         deploy_action.triggered.connect(self.deploy_pi_folder)
         tools_menu.addAction(deploy_action)
 
@@ -865,6 +865,7 @@ class MainWindow(QMainWindow):
         remote_dir = "/home/pi/anglerfish"
         pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
 
         if not local_dir.exists() or not local_dir.is_dir():
             QMessageBox.warning(
@@ -878,13 +879,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Deploy Failed", "Pi hostname is empty.")
             return
 
+        if pi_password:
+            method_note = "Files will be copied directly via SFTP (password auth)."
+        else:
+            method_note = "Files will be deployed via Git push/pull (SSH key auth)."
+
         confirmation = QMessageBox.question(
             self,
-            "Deploy Files",
+            "Deploy to Pi",
             (
-                f"Push local repo:\n{local_dir}\n\n"
-                f"then pull on Raspberry Pi:\n{pi_user}@{pi_host}:{remote_dir}\n\n"
-                "This uses Git (push on PC, pull on Pi). Continue?"
+                f"Deploy local PI folder to:\n{pi_user}@{pi_host}:{remote_dir}\n\n"
+                f"{method_note}\n\nContinue?"
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
@@ -892,19 +897,36 @@ class MainWindow(QMainWindow):
         if confirmation != QMessageBox.Yes:
             return
 
-        self.status_bar.showMessage("Deploying PI folder via Git...")
+        if pi_password and paramiko is None:
+            QMessageBox.critical(
+                self,
+                "Deploy Failed",
+                "Paramiko is required for password-based deploy.\nInstall with: pip install paramiko",
+            )
+            return
+
+        self.status_bar.showMessage("Deploying to Pi...")
         self.log_tab.append_log(
             f"Deploy started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
         )
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            ok, message = self._deploy_via_git(
-                host=pi_host,
-                user=pi_user,
-                local_dir=local_dir,
-                remote_dir=remote_dir,
-            )
+            if pi_password:
+                ok, message = self._deploy_via_sftp(
+                    host=pi_host,
+                    user=pi_user,
+                    password=pi_password,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+            else:
+                ok, message = self._deploy_via_git(
+                    host=pi_host,
+                    user=pi_user,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -916,14 +938,15 @@ class MainWindow(QMainWindow):
 
         self.status_bar.showMessage("Deploy failed", 8000)
         self.log_tab.append_log(f"Deploy failed: {message}")
+        tip = (
+            "Tip: Ensure Pi Password is filled in, or set up SSH key auth and use Git deploy."
+            if not pi_password
+            else "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
+        )
         QMessageBox.critical(
             self,
             "Deploy Failed",
-            (
-                "Could not deploy files.\n\n"
-                f"Reason:\n{message}\n\n"
-                "Tip: local PI and remote /home/pi/anglerfish must both be Git repos with a shared remote, and SSH access must work."
-            ),
+            f"Could not deploy files.\n\nReason:\n{message}\n\n{tip}",
         )
 
     @Slot()
@@ -1107,6 +1130,62 @@ class MainWindow(QMainWindow):
             return False, "Required executable not found (git or ssh)"
         except Exception as exc:
             return False, str(exc)
+
+    def _sftp_mkdir_p(self, sftp, remote_path: str) -> None:
+        """Recursively create remote directories via an open SFTP session."""
+        parts = [p for p in remote_path.split("/") if p]
+        current = ""
+        for part in parts:
+            current += "/" + part
+            try:
+                sftp.stat(current)
+            except IOError:
+                sftp.mkdir(current)
+
+    def _deploy_via_sftp(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        """Copy all files from local_dir to remote_dir on the Pi using Paramiko SFTP."""
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                username=user,
+                password=password,
+                timeout=8,
+                auth_timeout=8,
+                banner_timeout=8,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            sftp = client.open_sftp()
+            self._sftp_mkdir_p(sftp, remote_dir)
+
+            for local_file in sorted(local_dir.rglob("*")):
+                if not local_file.is_file():
+                    continue
+                relative = local_file.relative_to(local_dir)
+                remote_path = remote_dir + "/" + str(relative).replace("\\", "/")
+                remote_parent = remote_dir + "/" + str(relative.parent).replace("\\", "/")
+                if str(relative.parent) != ".":
+                    self._sftp_mkdir_p(sftp, remote_parent)
+                sftp.put(str(local_file), remote_path)
+
+            sftp.close()
+            client.close()
+            return True, "OK"
+        except Exception as exc:
+            error_text = str(exc)
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
 
     def _run_local_command(self, args: list[str], cwd: Optional[str] = None) -> tuple[bool, str]:
         result = subprocess.run(
