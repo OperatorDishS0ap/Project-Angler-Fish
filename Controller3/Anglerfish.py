@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+from urllib.parse import urlparse
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -152,14 +153,18 @@ class UdpLinkWorker(QThread):
     log_message = Signal(str)
     link_state = Signal(str)
 
-    def __init__(self, pi_host: str, cmd_port: int, telemetry_port: int, parent=None):
+    def __init__(self, pi_host: str, cmd_port: int, telemetry_port: int, fallback_host: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.pi_host = pi_host
         self.cmd_port = cmd_port
         self.telemetry_port = telemetry_port
+        self.fallback_host = (fallback_host or "").strip()
         self._running = True
         self._cmd_sock: Optional[socket.socket] = None
         self._telemetry_sock: Optional[socket.socket] = None
+        self._resolved_cmd_host: Optional[str] = None
+        self._next_resolve_ts = 0.0
+        self._resolve_error_logged = False
         self._latest_command = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "arm": False}
         self._latest_tuning = asdict(TuningData())
 
@@ -238,12 +243,54 @@ class UdpLinkWorker(QThread):
 
         return payload
 
+    def _resolve_cmd_target(self, force: bool = False) -> Optional[str]:
+        now = time.time()
+        if not force and self._resolved_cmd_host is not None and now < self._next_resolve_ts:
+            return self._resolved_cmd_host
+
+        hosts_to_try = []
+        if self.pi_host:
+            hosts_to_try.append(self.pi_host)
+        if self.fallback_host and self.fallback_host not in hosts_to_try:
+            hosts_to_try.append(self.fallback_host)
+        if self._resolved_cmd_host and self._resolved_cmd_host not in hosts_to_try:
+            hosts_to_try.append(self._resolved_cmd_host)
+
+        for host in hosts_to_try:
+            try:
+                info = socket.getaddrinfo(host, self.cmd_port, socket.AF_INET, socket.SOCK_DGRAM)
+                if info:
+                    resolved_ip = info[0][4][0]
+                    if resolved_ip != self._resolved_cmd_host:
+                        self.log_message.emit(f"Resolved motor target {host} -> {resolved_ip}")
+                    self._resolved_cmd_host = resolved_ip
+                    self._next_resolve_ts = now + 2.0
+                    self._resolve_error_logged = False
+                    return self._resolved_cmd_host
+            except socket.gaierror:
+                continue
+            except OSError:
+                continue
+
+        self._next_resolve_ts = now + 2.0
+        if not self._resolve_error_logged:
+            self.log_message.emit(
+                f"Unable to resolve motor target host (pi_host='{self.pi_host}', fallback='{self.fallback_host}')"
+            )
+            self._resolve_error_logged = True
+        return None
+
     def send_json(self, payload: dict):
         if not self._cmd_sock:
             return
         try:
             raw = json.dumps(payload).encode("utf-8")
-            self._cmd_sock.sendto(raw, (self.pi_host, self.cmd_port))
+            target_ip = self._resolve_cmd_target()
+            if not target_ip:
+                return
+            self._cmd_sock.sendto(raw, (target_ip, self.cmd_port))
+        except socket.gaierror:
+            self._resolve_cmd_target(force=True)
         except OSError as exc:
             self.log_message.emit(f"Send error: {exc}")
 
@@ -278,8 +325,9 @@ class UdpLinkWorker(QThread):
 
         self.link_state.emit("UDP link ready")
         self.log_message.emit(
-            f"Sending commands to {self.pi_host}:{self.cmd_port} | "
-            f"Telemetry: {'listening on 0.0.0.0:' + str(self.telemetry_port) if telemetry_ok else 'DISABLED (port in use)'}"
+            f"Sending commands to {self.pi_host}:{self.cmd_port}"
+            + (f" (fallback: {self.fallback_host})" if self.fallback_host else "")
+            + f" | Telemetry: {'listening on 0.0.0.0:' + str(self.telemetry_port) if telemetry_ok else 'DISABLED (port in use)'}"
         )
 
         last_command_tx = 0.0
@@ -292,6 +340,9 @@ class UdpLinkWorker(QThread):
             if self._telemetry_sock is not None:
                 try:
                     data, addr = self._telemetry_sock.recvfrom(8192)
+                    if self._resolved_cmd_host is None:
+                        self._resolved_cmd_host = addr[0]
+                        self.log_message.emit(f"Using telemetry source as motor target fallback: {addr[0]}")
                     payload = json.loads(data.decode("utf-8"))
                     if isinstance(payload, dict):
                         self.telemetry_received.emit(self._normalize_telemetry_payload(payload))
@@ -1000,6 +1051,7 @@ class MainWindow(QMainWindow):
 
         pi_host = self.pi_hostname_edit.text().strip()
         rtsp_url = self.rtsp_path_edit.text().strip()
+        rtsp_host = (urlparse(rtsp_url).hostname or "").strip()
         cmd_port = self.cmd_port_spin.value()
         telemetry_port = self.telemetry_port_spin.value()
 
@@ -1009,7 +1061,7 @@ class MainWindow(QMainWindow):
         self.video_worker.status_changed.connect(self.on_video_status)
         self.video_worker.start()
 
-        self.udp_worker = UdpLinkWorker(pi_host, cmd_port, telemetry_port)
+        self.udp_worker = UdpLinkWorker(pi_host, cmd_port, telemetry_port, fallback_host=rtsp_host)
         self.udp_worker.telemetry_received.connect(self.on_telemetry_packet)
         self.udp_worker.log_message.connect(self.log_tab.append_log)
         self.udp_worker.link_state.connect(self.on_link_status)
