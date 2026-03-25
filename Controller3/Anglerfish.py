@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
         self.controller_active = False
         self.controller_armed = False
         self.controller_a_last_press_time = 0.0
+        self.controller_missing_logged = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -648,6 +649,7 @@ class MainWindow(QMainWindow):
         self.controller_timer = QTimer(self)
         self.controller_timer.setInterval(33)
         self.controller_timer.timeout.connect(self._controller_poll_tick)
+        self._start_controller_polling()
 
         self._apply_dark_theme()
 
@@ -714,12 +716,15 @@ class MainWindow(QMainWindow):
                 pygame.joystick.init()
 
             if pygame.joystick.get_count() == 0:
-                self.log_tab.append_log("No Xbox controller detected")
+                if not self.controller_missing_logged:
+                    self.log_tab.append_log("No Xbox controller detected")
+                    self.controller_missing_logged = True
                 return False
 
             deadzone = float(self.tuning_tab.current_tuning().get("deadzone", 0.08))
             self.controller_device = xbox360_controller.Controller(dead_zone=deadzone)
             self.controller_active = True
+            self.controller_missing_logged = False
             self.log_tab.append_log("Xbox controller connected")
             return True
         except Exception as exc:
@@ -739,9 +744,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _controller_poll_tick(self):
-        if self.udp_worker is None:
-            return
         if not self._try_initialize_controller():
+            return
+        if self.udp_worker is None:
             return
 
         try:
@@ -966,8 +971,6 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def stop_links(self):
-        self._stop_controller_polling()
-
         if self.video_worker is not None:
             self.video_worker.stop()
             self.video_worker.wait(1500)
@@ -1017,10 +1020,8 @@ class MainWindow(QMainWindow):
         self.link_status.setText(f"UDP: {text}")
         if text == "UDP link ready":
             self.link_ready = True
-            self._start_controller_polling()
         elif text in ("UDP link failed", "UDP link stopped"):
             self.link_ready = False
-            self._stop_controller_polling()
         self._update_arm_buttons()
         self.log_tab.append_log(text)
 
@@ -1796,6 +1797,7 @@ class MainWindow(QMainWindow):
         self._update_video_overlay()
 
     def closeEvent(self, event):
+        self._stop_controller_polling()
         self.stop_links()
         super().closeEvent(event)
 
