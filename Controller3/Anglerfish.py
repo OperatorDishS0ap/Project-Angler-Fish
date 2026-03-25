@@ -2,14 +2,21 @@ import sys
 import time
 import json
 import socket
+import os
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
+
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -480,6 +487,10 @@ class MainWindow(QMainWindow):
         self.connection_box = SectionBox("Connection")
         connection_layout = QGridLayout(self.connection_box)
         self.pi_username_edit = QLineEdit("pi")
+        self.pi_password_edit = QLineEdit("")
+        self.pi_password_edit.setEchoMode(QLineEdit.Password)
+        self.pi_password_edit.setPlaceholderText("SSH password (optional)")
+        self.show_password_check = QCheckBox("Show Password")
         self.pi_hostname_edit = QLineEdit("anglerfish.local")
         self.rtsp_path_edit = QLineEdit("rtsp://anglerfish.local:8554/cam")
         self.cmd_port_spin = QSpinBox()
@@ -499,13 +510,16 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(self.pi_username_edit, 0, 1)
         connection_layout.addWidget(QLabel("Pi Hostname"), 0, 2)
         connection_layout.addWidget(self.pi_hostname_edit, 0, 3)
-        connection_layout.addWidget(QLabel("RTSP URL"), 1, 0)
-        connection_layout.addWidget(self.rtsp_path_edit, 1, 1, 1, 3)
-        connection_layout.addWidget(QLabel("Cmd Port"), 2, 0)
-        connection_layout.addWidget(self.cmd_port_spin, 2, 1)
-        connection_layout.addWidget(QLabel("Telemetry Port"), 2, 2)
-        connection_layout.addWidget(self.telemetry_port_spin, 2, 3)
-        connection_layout.addWidget(self.connect_btn, 3, 0)
+        connection_layout.addWidget(QLabel("Pi Password"), 1, 0)
+        connection_layout.addWidget(self.pi_password_edit, 1, 1, 1, 2)
+        connection_layout.addWidget(self.show_password_check, 1, 3)
+        connection_layout.addWidget(QLabel("RTSP URL"), 2, 0)
+        connection_layout.addWidget(self.rtsp_path_edit, 2, 1, 1, 3)
+        connection_layout.addWidget(QLabel("Cmd Port"), 3, 0)
+        connection_layout.addWidget(self.cmd_port_spin, 3, 1)
+        connection_layout.addWidget(QLabel("Telemetry Port"), 3, 2)
+        connection_layout.addWidget(self.telemetry_port_spin, 3, 3)
+        connection_layout.addWidget(self.connect_btn, 4, 0)
 
         self.disconnect_only_widget = QWidget()
         disconnect_only_layout = QHBoxLayout(self.disconnect_only_widget)
@@ -622,6 +636,11 @@ class MainWindow(QMainWindow):
         self.disarm_btn.clicked.connect(lambda: self.send_arm_state(False))
         self.tuning_tab.tuning_changed.connect(self.on_tuning_changed)
         self.pi_hostname_edit.textChanged.connect(self.update_rtsp_url_from_host)
+        self.show_password_check.toggled.connect(self.on_show_password_toggled)
+
+    @Slot(bool)
+    def on_show_password_toggled(self, checked: bool):
+        self.pi_password_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
 
     def _update_arm_buttons(self):
         self.arm_btn.setEnabled(self.link_ready and not self.telemetry.armed)
@@ -1055,14 +1074,11 @@ class MainWindow(QMainWindow):
             if dirty_check.stdout.strip():
                 return False, "Local PI repository has uncommitted changes; commit or stash before deploy"
 
-            push_result = subprocess.run(
-                ["git", "-C", local_dir_str, "push", "origin", "main"],
-                capture_output=True,
-                text=True,
-                check=False,
+            ok, output = self._run_git_push_command(
+                ["git", "-C", local_dir_str, "push", "origin", "main"]
             )
-            if push_result.returncode != 0:
-                return False, (push_result.stderr or push_result.stdout or "Local git push failed").strip()
+            if not ok:
+                return False, output
 
             remote_quoted = shlex.quote(remote_dir)
             ssh_prefix = self._build_ssh_prefix(user, host)
@@ -1104,6 +1120,56 @@ class MainWindow(QMainWindow):
             return False, (result.stderr or result.stdout or "Command failed").strip()
         return True, (result.stdout or "").strip()
 
+    def _run_git_push_command(self, args: list[str]) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        if not password:
+            return self._run_local_command(args)
+
+        askpass_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".cmd", encoding="utf-8") as askpass_file:
+                askpass_file.write("@echo off\r\n")
+                askpass_file.write("echo %ANGLERFISH_SSH_PASSWORD%\r\n")
+                askpass_path = askpass_file.name
+
+            env = os.environ.copy()
+            env["ANGLERFISH_SSH_PASSWORD"] = password
+            env["SSH_ASKPASS"] = askpass_path
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["DISPLAY"] = "anglerfish"
+            env["GIT_SSH_COMMAND"] = (
+                "ssh -o BatchMode=no "
+                "-o PreferredAuthentications=publickey,password,keyboard-interactive "
+                "-o StrictHostKeyChecking=accept-new "
+                "-o ConnectTimeout=8"
+            )
+
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or "git push failed").strip()
+                hint = self._classify_ssh_error(
+                    self.pi_username_edit.text().strip() or "pi",
+                    self.pi_hostname_edit.text().strip(),
+                    error_text,
+                )
+                if hint:
+                    return False, f"{error_text}\nHint: {hint}"
+                return False, error_text
+            return True, (result.stdout or "").strip()
+        finally:
+            if askpass_path:
+                try:
+                    os.remove(askpass_path)
+                except OSError:
+                    pass
+
     def _build_ssh_prefix(self, user: str, host: str) -> list[str]:
         return [
             "ssh",
@@ -1118,6 +1184,9 @@ class MainWindow(QMainWindow):
             f"{user}@{host}",
         ]
 
+    def _get_ssh_password(self) -> str:
+        return self.pi_password_edit.text()
+
     def _classify_ssh_error(self, user: str, host: str, raw_error: str) -> Optional[str]:
         text = (raw_error or "").lower()
         if not text:
@@ -1125,7 +1194,7 @@ class MainWindow(QMainWindow):
 
         if "permission denied" in text:
             return (
-                f"Authentication failed for {user}@{host}. Verify Pi Username in the UI, then test with: "
+                f"Authentication failed for {user}@{host}. Verify Pi Username and Pi Password in the UI, then test with: "
                 f"ssh {user}@{host}."
             )
         if "host key verification failed" in text or "remote host identification has changed" in text:
@@ -1143,6 +1212,46 @@ class MainWindow(QMainWindow):
         return None
 
     def _run_ssh_command(self, user: str, host: str, command: str) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        if password:
+            if paramiko is None:
+                return (
+                    False,
+                    "SSH password was provided, but Paramiko is not installed. Install with: pip install paramiko",
+                )
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=host,
+                    username=user,
+                    password=password,
+                    timeout=8,
+                    auth_timeout=8,
+                    banner_timeout=8,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+                stdin, stdout, stderr = client.exec_command(command, timeout=25)
+                _ = stdin
+                out_text = stdout.read().decode("utf-8", errors="replace").strip()
+                err_text = stderr.read().decode("utf-8", errors="replace").strip()
+                exit_code = stdout.channel.recv_exit_status()
+                client.close()
+                if exit_code != 0:
+                    error_text = err_text or out_text or "SSH command failed"
+                    hint = self._classify_ssh_error(user, host, error_text)
+                    if hint:
+                        return False, f"{error_text}\nHint: {hint}"
+                    return False, error_text
+                return True, out_text
+            except Exception as exc:
+                error_text = str(exc)
+                hint = self._classify_ssh_error(user, host, error_text)
+                if hint:
+                    return False, f"{error_text}\nHint: {hint}"
+                return False, error_text
+
         ssh_prefix = self._build_ssh_prefix(user, host)
         result = subprocess.run(
             ssh_prefix + [command],
@@ -1224,7 +1333,7 @@ class MainWindow(QMainWindow):
                 if not ok and "nothing to commit" not in output:
                     return False, f"Initial local commit failed: {output}"
 
-            ok, output = self._run_local_command(
+            ok, output = self._run_git_push_command(
                 ["git", "-C", local_dir_str, "push", "-u", "origin", "main"]
             )
             if not ok:
