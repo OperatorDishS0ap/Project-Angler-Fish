@@ -17,6 +17,16 @@ try:
 except ImportError:
     paramiko = None
 
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
+try:
+    import xbox360_controller
+except ImportError:
+    xbox360_controller = None
+
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
@@ -150,7 +160,7 @@ class UdpLinkWorker(QThread):
         self._running = True
         self._cmd_sock: Optional[socket.socket] = None
         self._telemetry_sock: Optional[socket.socket] = None
-        self._latest_command = {"m1": 0, "m2": 0, "m3": 0, "m4": 0, "armed": False}
+        self._latest_command = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "arm": False}
         self._latest_tuning = asdict(TuningData())
 
     def stop(self):
@@ -158,12 +168,42 @@ class UdpLinkWorker(QThread):
 
     @Slot(dict)
     def update_command(self, cmd: dict):
+        if "armed" in cmd and "arm" not in cmd:
+            cmd = dict(cmd)
+            cmd["arm"] = bool(cmd["armed"])
         self._latest_command.update(cmd)
+        if not bool(self._latest_command.get("arm", False)):
+            self._latest_command["m1"] = 0.0
+            self._latest_command["m2"] = 0.0
+            self._latest_command["m3"] = 0.0
+            self._latest_command["m4"] = 0.0
 
     @Slot(dict)
     def update_tuning(self, tuning: dict):
         self._latest_tuning.update(tuning)
-        self.send_json({"type": "tuning", "data": self._latest_tuning})
+        tune_payload = {"type": "tune"}
+        if "pulse_min_us" in self._latest_tuning:
+            tune_payload["pulse_min_us"] = int(self._latest_tuning["pulse_min_us"])
+        if "pulse_max_us" in self._latest_tuning:
+            tune_payload["pulse_max_us"] = int(self._latest_tuning["pulse_max_us"])
+        if len(tune_payload) > 1:
+            self.send_json(tune_payload)
+
+    def _build_motor_command_payload(self) -> dict:
+        armed = bool(self._latest_command.get("arm", self._latest_command.get("armed", False)))
+        if not armed:
+            return {
+                "type": "command",
+                "arm": False,
+            }
+        return {
+            "type": "command",
+            "m1": float(self._latest_command.get("m1", 0.0)),
+            "m2": float(self._latest_command.get("m2", 0.0)),
+            "m3": float(self._latest_command.get("m3", 0.0)),
+            "m4": float(self._latest_command.get("m4", 0.0)),
+            "arm": True,
+        }
 
     def send_json(self, payload: dict):
         if not self._cmd_sock:
@@ -196,7 +236,7 @@ class UdpLinkWorker(QThread):
         while self._running:
             now = time.time()
             if now - last_command_tx >= 0.05:
-                self.send_json({"type": "command", "data": self._latest_command})
+                self.send_json(self._build_motor_command_payload())
                 last_command_tx = now
 
             try:
@@ -473,6 +513,10 @@ class MainWindow(QMainWindow):
         self.video_worker: Optional[VideoWorker] = None
         self.udp_worker: Optional[UdpLinkWorker] = None
         self.link_ready = False
+        self.controller_device = None
+        self.controller_active = False
+        self.controller_armed = False
+        self.controller_a_last_press_time = 0.0
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -601,6 +645,10 @@ class MainWindow(QMainWindow):
         self.demo_timer = QTimer(self)
         self.demo_timer.timeout.connect(self._demo_telemetry_tick)
 
+        self.controller_timer = QTimer(self)
+        self.controller_timer.setInterval(33)
+        self.controller_timer.timeout.connect(self._controller_poll_tick)
+
         self._apply_dark_theme()
 
     @Slot(str)
@@ -641,6 +689,152 @@ class MainWindow(QMainWindow):
     @Slot(bool)
     def on_show_password_toggled(self, checked: bool):
         self.pi_password_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+
+    @staticmethod
+    def _clamp(value: float, minimum: float, maximum: float) -> float:
+        return max(minimum, min(maximum, value))
+
+    def _apply_deadzone(self, value: float, deadzone: float) -> float:
+        if abs(value) < deadzone:
+            return 0.0
+        return value
+
+    def _try_initialize_controller(self) -> bool:
+        if self.controller_active and self.controller_device is not None:
+            return True
+
+        if pygame is None or xbox360_controller is None:
+            self.log_tab.append_log("Controller disabled: install pygame and ensure xbox360_controller.py is present")
+            return False
+
+        try:
+            if not pygame.get_init():
+                pygame.init()
+            if not pygame.joystick.get_init():
+                pygame.joystick.init()
+
+            if pygame.joystick.get_count() == 0:
+                self.log_tab.append_log("No Xbox controller detected")
+                return False
+
+            deadzone = float(self.tuning_tab.current_tuning().get("deadzone", 0.08))
+            self.controller_device = xbox360_controller.Controller(dead_zone=deadzone)
+            self.controller_active = True
+            self.log_tab.append_log("Xbox controller connected")
+            return True
+        except Exception as exc:
+            self.controller_device = None
+            self.controller_active = False
+            self.log_tab.append_log(f"Controller init failed: {exc}")
+            return False
+
+    def _start_controller_polling(self):
+        if self._try_initialize_controller():
+            self.controller_timer.start()
+
+    def _stop_controller_polling(self):
+        self.controller_timer.stop()
+        self.controller_device = None
+        self.controller_active = False
+
+    @Slot()
+    def _controller_poll_tick(self):
+        if self.udp_worker is None:
+            return
+        if not self._try_initialize_controller():
+            return
+
+        try:
+            pygame.event.pump()
+            buttons = self.controller_device.get_buttons()
+            lt_x, lt_y = self.controller_device.get_left_stick()
+            rt_x, _rt_y = self.controller_device.get_right_stick()
+            triggers = self.controller_device.get_triggers()
+            pad_up, pad_right, pad_down, pad_left = self.controller_device.get_pad()
+        except Exception as exc:
+            self.log_tab.append_log(f"Controller read failed: {exc}")
+            self._stop_controller_polling()
+            return
+
+        if hasattr(xbox360_controller, "A") and xbox360_controller.A < len(buttons):
+            if buttons[xbox360_controller.A]:
+                now = time.time()
+                if now - self.controller_a_last_press_time > 0.5:
+                    self.controller_armed = not self.controller_armed
+                    self.controller_a_last_press_time = now
+                    self.log_tab.append_log("Controller ARMED" if self.controller_armed else "Controller DISARMED")
+
+        tuning = self.tuning_tab.current_tuning()
+        deadzone = float(tuning.get("deadzone", 0.08))
+        trigger_scale = float(tuning.get("trigger_scale", 1.0))
+        yaw_scale = float(tuning.get("yaw_scale", 1.0))
+        strafe_scale = float(tuning.get("strafe_scale", 1.0))
+        vertical_scale = float(tuning.get("vertical_scale", 1.0))
+
+        lt_x = self._clamp(self._apply_deadzone(float(lt_x), deadzone) * strafe_scale, -1.0, 1.0)
+        lt_y = self._clamp(self._apply_deadzone(float(lt_y), deadzone) * vertical_scale, -1.0, 1.0)
+        rt_x = self._clamp(self._apply_deadzone(float(rt_x), deadzone) * yaw_scale, -1.0, 1.0)
+        triggers = self._clamp(self._apply_deadzone(float(triggers), deadzone) * trigger_scale, -1.0, 1.0)
+
+        yaw_flag = False
+        pitch_flag = False
+        m1 = m2 = m3 = m4 = 0.0
+
+        if abs(triggers) > 0.05:
+            m1 = triggers
+            m2 = triggers
+            yaw_flag = True
+
+        yaw_step = self._clamp(0.3 * yaw_scale, 0.0, 1.0)
+        if not yaw_flag:
+            if abs(rt_x) > 0.05:
+                m2 = rt_x
+                m1 = -m2
+            elif pad_left > 0:
+                m2 = yaw_step
+                m1 = -m2
+            elif pad_right > 0:
+                m2 = -yaw_step
+                m1 = -m2
+
+        pitch_step = self._clamp(0.3 * vertical_scale, 0.0, 1.0)
+        if abs(lt_y) > 0.05:
+            m3 = -lt_y
+            m4 = m3
+            pitch_flag = True
+        elif pad_up > 0:
+            m3 = pitch_step
+            m4 = m3
+            pitch_flag = True
+        elif pad_down > 0:
+            m3 = -pitch_step
+            m4 = m3
+            pitch_flag = True
+
+        if not pitch_flag and abs(lt_x) > 0.05:
+            m4 = lt_x
+            m3 = -m4
+
+        if not self.controller_armed:
+            m1 = m2 = m3 = m4 = 0.0
+
+        payload = {
+            "m1": self._clamp(m1 * 100.0, -100.0, 100.0),
+            "m2": self._clamp(m2 * 100.0, -100.0, 100.0),
+            "m3": self._clamp(m3 * 100.0, -100.0, 100.0),
+            "m4": self._clamp(m4 * 100.0, -100.0, 100.0),
+            "arm": self.controller_armed,
+        }
+        self.udp_worker.update_command(payload)
+
+        self.telemetry.m1 = int(payload["m1"])
+        self.telemetry.m2 = int(payload["m2"])
+        self.telemetry.m3 = int(payload["m3"])
+        self.telemetry.m4 = int(payload["m4"])
+        self.telemetry.armed = self.controller_armed
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_arm_buttons()
+        self._update_video_overlay()
 
     def _update_arm_buttons(self):
         self.arm_btn.setEnabled(self.link_ready and not self.telemetry.armed)
@@ -772,6 +966,8 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def stop_links(self):
+        self._stop_controller_polling()
+
         if self.video_worker is not None:
             self.video_worker.stop()
             self.video_worker.wait(1500)
@@ -821,8 +1017,10 @@ class MainWindow(QMainWindow):
         self.link_status.setText(f"UDP: {text}")
         if text == "UDP link ready":
             self.link_ready = True
+            self._start_controller_polling()
         elif text in ("UDP link failed", "UDP link stopped"):
             self.link_ready = False
+            self._stop_controller_polling()
         self._update_arm_buttons()
         self.log_tab.append_log(text)
 
@@ -843,12 +1041,13 @@ class MainWindow(QMainWindow):
             self.udp_worker.update_tuning(tuning)
 
     def send_arm_state(self, armed: bool):
+        self.controller_armed = armed
         self.telemetry.armed = armed
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
         self._update_video_overlay()
         if self.udp_worker is not None:
-            self.udp_worker.update_command({"armed": armed})
+            self.udp_worker.update_command({"arm": armed})
         self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")
 
     def toggle_demo(self):

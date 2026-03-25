@@ -201,6 +201,7 @@ def main():
                     print("[sub_motors_400hz] DISARM command received; forcing neutral.")
                 arm_active = False
                 arm_started_at = None
+                last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
             else:
                 if arm_started_at is None:
                     arm_started_at = time.time()
