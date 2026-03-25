@@ -1357,10 +1357,16 @@ class MainWindow(QMainWindow):
         try:
             local_dir_str = str(local_dir)
 
-            ok, output = self._run_local_command(
-                ["git", "-C", local_dir_str, "rev-parse", "--is-inside-work-tree"]
+            # Check if local_dir already sits inside a parent git repo (e.g. the main project repo).
+            # If the git root is not local_dir itself, we must init a fresh repo scoped to local_dir
+            # rather than contaminating the parent repo's remotes.
+            root_check = self._run_local_command(
+                ["git", "-C", local_dir_str, "rev-parse", "--show-toplevel"]
             )
-            if not ok:
+            own_repo = root_check[0] and Path(root_check[1]).resolve() == local_dir.resolve()
+
+            if not own_repo:
+                # Initialise a new git repo scoped exactly to local_dir
                 ok, output = self._run_local_command(
                     ["git", "-C", local_dir_str, "init", "-b", "main"]
                 )
