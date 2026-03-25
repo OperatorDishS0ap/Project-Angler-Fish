@@ -8,15 +8,9 @@ import math
 import ms5837
 from mpu6050 import mpu6050
 
-sensor = ms5837.MS5837_30BA()
-imu = mpu6050(0x68)  #MPU6050 I2C address
-
-if not sensor.init():
-    print("Sensor could not be initialized")
-    exit(1)
-if not sensor.read():
-    print("Sensor read failed!")
-    exit(1)
+IMU_I2C_ADDR = int(os.environ.get("ANGLERFISH_IMU_I2C_ADDR", "0x68"), 16)
+IMU_INIT_RETRIES = int(os.environ.get("ANGLERFISH_IMU_INIT_RETRIES", "5"))
+IMU_RETRY_DELAY_S = float(os.environ.get("ANGLERFISH_IMU_RETRY_DELAY_S", "0.5"))
 
 PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # set to your Windows ethernet IP
 PC_PORT = int(os.environ.get("ANGLERFISH_PC_PORT", "9001"))
@@ -35,11 +29,36 @@ def read_pi_temp_c() -> float:
     except Exception:
         return 0.0
 
-def bar30():
-    pressure = sensor.pressure(ms5837.UNITS_psi)
-    temperature = sensor.temperature(ms5837.UNITS_Centigrade)
-    depth = sensor.depth()
+def bar30(sensor_dev):
+    pressure = sensor_dev.pressure(ms5837.UNITS_psi)
+    temperature = sensor_dev.temperature(ms5837.UNITS_Centigrade)
+    depth = sensor_dev.depth()
     return pressure, temperature, depth
+
+
+def init_bar30():
+    sensor_dev = ms5837.MS5837_30BA()
+    if not sensor_dev.init():
+        print("[sensors] BAR30 init failed; continuing without pressure/depth")
+        return None
+    if not sensor_dev.read():
+        print("[sensors] BAR30 first read failed; continuing without pressure/depth")
+        return None
+    return sensor_dev
+
+
+def init_imu_with_retry(address: int, retries: int, delay_s: float):
+    for attempt in range(1, retries + 1):
+        try:
+            imu_dev = mpu6050(address)
+            print(f"[sensors] MPU6050 initialized at 0x{address:02X}")
+            return imu_dev
+        except OSError as exc:
+            print(f"[sensors] MPU6050 init failed (attempt {attempt}/{retries}): {exc}")
+            if attempt < retries:
+                time.sleep(delay_s)
+    print("[sensors] Continuing without MPU6050; acceleration/imu temp will be zeroed")
+    return None
 
 
 def _avg(values):
@@ -61,6 +80,11 @@ def _changed_enough(current, previous):
 
 
 def main():
+    sensor = init_bar30()
+    imu = init_imu_with_retry(IMU_I2C_ADDR, IMU_INIT_RETRIES, IMU_RETRY_DELAY_S)
+    if sensor is None and imu is None:
+        raise SystemExit("No sensors initialized (BAR30 and MPU6050 unavailable)")
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dt = 1.0 / max(1.0, RATE_HZ)
     speed = 0.0  # Integrated speed from acceleration
@@ -83,15 +107,27 @@ def main():
     }
     window_start = time.time()
     last_sent_values = None
+    last_imu_reconnect_try = 0.0
     
     while True:
         temp_pi = read_pi_temp_c()
-        if sensor.read():
-            pressure, temp_env, depth = bar30()
+        if sensor is not None and sensor.read():
+            pressure, temp_env, depth = bar30(sensor)
 
         # Read IMU data
-        accel = imu.get_accel_data()
-        imu_temp = imu.get_temp()
+        accel = {"x": 0.0, "y": 0.0, "z": GRAVITY}
+        imu_temp = 0.0
+        if imu is not None:
+            try:
+                accel = imu.get_accel_data()
+                imu_temp = imu.get_temp()
+            except OSError as exc:
+                print(f"[sensors] MPU6050 read failed: {exc}")
+                imu = None
+
+        if imu is None and (time.time() - last_imu_reconnect_try) >= 2.0:
+            last_imu_reconnect_try = time.time()
+            imu = init_imu_with_retry(IMU_I2C_ADDR, 1, 0.0)
         
         # Calculate acceleration magnitude
         accel_magnitude = math.sqrt(accel['x']**2 + accel['y']**2 + accel['z']**2)
