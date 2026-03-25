@@ -479,6 +479,7 @@ class MainWindow(QMainWindow):
 
         self.connection_box = SectionBox("Connection")
         connection_layout = QGridLayout(self.connection_box)
+        self.pi_username_edit = QLineEdit("pi")
         self.pi_hostname_edit = QLineEdit("anglerfish.local")
         self.rtsp_path_edit = QLineEdit("rtsp://anglerfish.local:8554/cam")
         self.cmd_port_spin = QSpinBox()
@@ -494,8 +495,10 @@ class MainWindow(QMainWindow):
         self.arm_btn = QPushButton("Arm")
         self.disarm_btn = QPushButton("Disarm")
 
-        connection_layout.addWidget(QLabel("Pi Hostname"), 0, 0)
-        connection_layout.addWidget(self.pi_hostname_edit, 0, 1)
+        connection_layout.addWidget(QLabel("Pi Username"), 0, 0)
+        connection_layout.addWidget(self.pi_username_edit, 0, 1)
+        connection_layout.addWidget(QLabel("Pi Hostname"), 0, 2)
+        connection_layout.addWidget(self.pi_hostname_edit, 0, 3)
         connection_layout.addWidget(QLabel("RTSP URL"), 1, 0)
         connection_layout.addWidget(self.rtsp_path_edit, 1, 1, 1, 3)
         connection_layout.addWidget(QLabel("Cmd Port"), 2, 0)
@@ -841,7 +844,7 @@ class MainWindow(QMainWindow):
     def deploy_pi_folder(self):
         local_dir = Path(__file__).resolve().parent / "PI"
         remote_dir = "/home/pi/anglerfish"
-        pi_user = "pi"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
 
         if not local_dir.exists() or not local_dir.is_dir():
@@ -909,7 +912,7 @@ class MainWindow(QMainWindow):
         local_dir = Path(__file__).resolve().parent / "PI"
         remote_working_dir = "/home/pi/anglerfish"
         remote_bare_repo = "/home/pi/anglerfish.git"
-        pi_user = "pi"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
 
         if not local_dir.exists() or not local_dir.is_dir():
@@ -976,7 +979,7 @@ class MainWindow(QMainWindow):
         local_dir = Path(__file__).resolve().parent / "PI"
         remote_working_dir = "/home/pi/anglerfish"
         remote_bare_repo = "/home/pi/anglerfish.git"
-        pi_user = "pi"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
 
         if not pi_host:
@@ -1062,16 +1065,7 @@ class MainWindow(QMainWindow):
                 return False, (push_result.stderr or push_result.stdout or "Local git push failed").strip()
 
             remote_quoted = shlex.quote(remote_dir)
-            ssh_prefix = [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=8",
-                f"{user}@{host}",
-            ]
+            ssh_prefix = self._build_ssh_prefix(user, host)
 
             remote_pull_command = (
                 f"mkdir -p {remote_quoted} && "
@@ -1110,17 +1104,46 @@ class MainWindow(QMainWindow):
             return False, (result.stderr or result.stdout or "Command failed").strip()
         return True, (result.stdout or "").strip()
 
-    def _run_ssh_command(self, user: str, host: str, command: str) -> tuple[bool, str]:
-        ssh_prefix = [
+    def _build_ssh_prefix(self, user: str, host: str) -> list[str]:
+        return [
             "ssh",
             "-o",
-            "BatchMode=yes",
+            "BatchMode=no",
+            "-o",
+            "PreferredAuthentications=publickey,password,keyboard-interactive",
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-o",
             "ConnectTimeout=8",
             f"{user}@{host}",
         ]
+
+    def _classify_ssh_error(self, user: str, host: str, raw_error: str) -> Optional[str]:
+        text = (raw_error or "").lower()
+        if not text:
+            return None
+
+        if "permission denied" in text:
+            return (
+                f"Authentication failed for {user}@{host}. Verify Pi Username in the UI, then test with: "
+                f"ssh {user}@{host}."
+            )
+        if "host key verification failed" in text or "remote host identification has changed" in text:
+            return (
+                f"Host key mismatch for {host}. Remove/update the old key in known_hosts, then reconnect."
+            )
+        if "could not resolve hostname" in text or "name or service not known" in text:
+            return f"Hostname {host} could not be resolved. Check Pi Hostname or local DNS/mDNS."
+        if "connection timed out" in text or "operation timed out" in text:
+            return f"Connection to {host} timed out. Check network, power, and SSH service on the Pi."
+        if "connection refused" in text:
+            return f"SSH port refused on {host}. Ensure SSH is enabled and running on the Pi."
+        if "no route to host" in text or "network is unreachable" in text:
+            return f"No network route to {host}. Verify both devices are on the same reachable network."
+        return None
+
+    def _run_ssh_command(self, user: str, host: str, command: str) -> tuple[bool, str]:
+        ssh_prefix = self._build_ssh_prefix(user, host)
         result = subprocess.run(
             ssh_prefix + [command],
             capture_output=True,
@@ -1128,7 +1151,11 @@ class MainWindow(QMainWindow):
             check=False,
         )
         if result.returncode != 0:
-            return False, (result.stderr or result.stdout or "SSH command failed").strip()
+            error_text = (result.stderr or result.stdout or "SSH command failed").strip()
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
         return True, (result.stdout or "").strip()
 
     def _initialize_git_deploy(
