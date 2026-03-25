@@ -57,6 +57,41 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def connect_pigpio_with_retry(retries: int = 5, delay_s: float = 0.5) -> pigpio.pi:
+    last_pi = None
+    for _ in range(retries):
+        pi = pigpio.pi()
+        last_pi = pi
+        if pi.connected:
+            return pi
+        try:
+            pi.stop()
+        except Exception:
+            pass
+        time.sleep(delay_s)
+    if last_pi is not None:
+        try:
+            last_pi.stop()
+        except Exception:
+            pass
+    raise SystemExit("pigpio daemon not running or unstable. Start with: sudo systemctl restart pigpiod")
+
+
+def pigpio_call(pi: pigpio.pi, method_name: str, *args):
+    method = getattr(pi, method_name)
+    try:
+        return pi, method(*args)
+    except (BrokenPipeError, OSError):
+        try:
+            pi.stop()
+        except Exception:
+            pass
+        time.sleep(0.2)
+        pi = connect_pigpio_with_retry(retries=5, delay_s=0.3)
+        method = getattr(pi, method_name)
+        return pi, method(*args)
+
+
 def i16_to_pct(v_i16: int) -> float:
     # -1000..+1000 => -100..+100
     return clamp((float(v_i16) / 1000.0) * 100.0, -100.0, 100.0)
@@ -82,17 +117,18 @@ def pct_to_pulse_us(pct: float, pulse_min_us: int, pulse_max_us: int) -> int:
 
 
 def setup_pwm_esc(pi: pigpio.pi, gpio: int):
-    pi.set_mode(gpio, pigpio.OUTPUT)
+    pi, _ = pigpio_call(pi, "set_mode", gpio, pigpio.OUTPUT)
 
     # Ensure servo mode is off (servo mode is ~50Hz)
-    pi.set_servo_pulsewidth(gpio, 0)
+    pi, _ = pigpio_call(pi, "set_servo_pulsewidth", gpio, 0)
 
     # Configure PWM
-    pi.set_PWM_frequency(gpio, ESC_FREQ_HZ)
-    pi.set_PWM_range(gpio, PWM_RANGE)
+    pi, _ = pigpio_call(pi, "set_PWM_frequency", gpio, ESC_FREQ_HZ)
+    pi, _ = pigpio_call(pi, "set_PWM_range", gpio, PWM_RANGE)
 
     # Neutral output to arm
-    pi.set_PWM_dutycycle(gpio, PULSE_NEUTRAL)
+    pi, _ = pigpio_call(pi, "set_PWM_dutycycle", gpio, PULSE_NEUTRAL)
+    return pi
 
 
 def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pulse_max_us: int):
@@ -105,23 +141,25 @@ def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pul
     pulse_min_us = int(clamp(pulse_min_us, 1000, AVOID_LO))
     pulse_max_us = int(clamp(pulse_max_us, AVOID_HI, 2000))
     pulse_us = clamp(pulse_us, pulse_min_us, pulse_max_us)
-    pi.set_PWM_dutycycle(gpio, pulse_us)
+    pi, _ = pigpio_call(pi, "set_PWM_dutycycle", gpio, pulse_us)
+    return pi
 
 
 def main():
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise SystemExit("pigpio daemon not running. Start with: sudo systemctl start pigpiod")
+    pi = connect_pigpio_with_retry()
 
     # Setup all ESC outputs
     for g in ALL_GPIOS:
-        setup_pwm_esc(pi, g)
+        pi = setup_pwm_esc(pi, g)
 
     # Debug: confirm PWM config (PWM mode; do NOT call get_servo_pulsewidth)
     for g in ALL_GPIOS:
+        pi, pwm_freq = pigpio_call(pi, "get_PWM_frequency", g)
+        pi, pwm_range = pigpio_call(pi, "get_PWM_range", g)
+        pi, duty = pigpio_call(pi, "get_PWM_dutycycle", g)
         print(
-            f"GPIO {g}: pwm_freq={pi.get_PWM_frequency(g)}Hz "
-            f"pwm_range={pi.get_PWM_range(g)} duty={pi.get_PWM_dutycycle(g)}"
+            f"GPIO {g}: pwm_freq={pwm_freq}Hz "
+            f"pwm_range={pwm_range} duty={duty}"
         )
 
     print(f"[sub_motors_400hz] Arming at neutral ({PULSE_NEUTRAL}us) for {ARM_TIME_S:.1f}s ...")
@@ -213,20 +251,20 @@ def main():
 
             # Apply outputs (PWM @ 400Hz)
             if arm_active:
-                set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
             else:
                 for g in ALL_GPIOS:
-                    set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
+                    pi = set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
 
             time.sleep(LOOP_SLEEP_S)
 
     finally:
         # Neutral on exit
         for g in ALL_GPIOS:
-            set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
+            pi = set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
         time.sleep(0.5)
         pi.stop()
 
