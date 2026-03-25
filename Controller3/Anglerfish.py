@@ -124,6 +124,7 @@ class VideoWorker(QThread):
         self.status_changed.emit("Video connected")
         prev_time = time.time()
         fps = 0.0
+        fps_alpha = 0.2
 
         while self._running:
             ok, frame = self._capture.read()
@@ -133,7 +134,12 @@ class VideoWorker(QThread):
 
             now = time.time()
             dt = max(now - prev_time, 1e-6)
-            fps = 1.0 / dt
+            fps_instant = 1.0 / dt
+            if fps <= 0.0:
+                fps = fps_instant
+            else:
+                fps = (fps_alpha * fps_instant) + ((1.0 - fps_alpha) * fps)
+            fps = max(0.0, min(120.0, fps))
             prev_time = now
 
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -165,6 +171,8 @@ class UdpLinkWorker(QThread):
         self._resolved_cmd_host: Optional[str] = None
         self._next_resolve_ts = 0.0
         self._resolve_error_logged = False
+        self._broadcast_cmd_ip = "255.255.255.255"
+        self._broadcast_fallback_logged = False
         self._latest_command = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "arm": False}
         self._latest_tuning = asdict(TuningData())
 
@@ -283,14 +291,27 @@ class UdpLinkWorker(QThread):
     def send_json(self, payload: dict):
         if not self._cmd_sock:
             return
-        try:
-            raw = json.dumps(payload).encode("utf-8")
-            target_ip = self._resolve_cmd_target()
-            if not target_ip:
+        raw = json.dumps(payload).encode("utf-8")
+
+        target_ip = self._resolve_cmd_target()
+        if target_ip:
+            try:
+                self._cmd_sock.sendto(raw, (target_ip, self.cmd_port))
+                self._broadcast_fallback_logged = False
                 return
-            self._cmd_sock.sendto(raw, (target_ip, self.cmd_port))
-        except socket.gaierror:
-            self._resolve_cmd_target(force=True)
+            except socket.gaierror:
+                self._resolve_cmd_target(force=True)
+            except OSError as exc:
+                self.log_message.emit(f"Send error: {exc}")
+
+        # Last-resort fallback for Wi-Fi / mDNS cases where no IPv4 hostname resolution exists.
+        try:
+            self._cmd_sock.sendto(raw, (self._broadcast_cmd_ip, self.cmd_port))
+            if not self._broadcast_fallback_logged:
+                self.log_message.emit(
+                    f"No IPv4 host resolved; broadcasting motor commands to {self._broadcast_cmd_ip}:{self.cmd_port}"
+                )
+                self._broadcast_fallback_logged = True
         except OSError as exc:
             self.log_message.emit(f"Send error: {exc}")
 
@@ -298,6 +319,7 @@ class UdpLinkWorker(QThread):
         # --- Command socket (send-only, never needs to bind) ---
         try:
             self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             self._cmd_sock.setblocking(False)
         except OSError as exc:
             self.link_state.emit("UDP link failed")
