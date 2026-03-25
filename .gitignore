@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+env/
+
+# PI deploy folder — managed separately, not tracked by main repo
+Controller3/PI/.git/
+
+# VS Code
+.vscode/settings.json
