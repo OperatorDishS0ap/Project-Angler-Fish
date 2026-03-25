@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import threading
 import time
 
@@ -54,6 +55,13 @@ def save_config(cfg):
             json.dump(cfg, f, indent=2)
     except Exception:
         pass
+
+
+def resolve_ipv6_host(host: str, port: int):
+    infos = socket.getaddrinfo(host, port, family=socket.AF_INET6, type=socket.SOCK_STREAM)
+    if not infos:
+        raise RuntimeError(f"No IPv6 address found for host '{host}'")
+    return infos[0][4]
 
 
 class StatusBox(QWidget):
@@ -216,7 +224,7 @@ class AnglerFishApp(QMainWindow):
         self.resize(1200, 700)
 
         cfg = load_config()
-        self.pi_ip = cfg.get("ip", "anglerfish.local")
+        self.pi_ip = cfg.get("host", cfg.get("ip", "anglerfish.local"))
         self.pi_user = cfg.get("user", "pi")
         self.pi_pass = cfg.get("pass", "raspberry")
         self.save_creds = cfg.get("save", True)
@@ -291,7 +299,12 @@ class AnglerFishApp(QMainWindow):
     def _ssh_connect(self):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.pi_ip_input.text().strip(), username=self.pi_user_input.text().strip(), password=self.pi_pass_input.text(), timeout=8)
+        host = self.pi_ip_input.text().strip()
+        sockaddr = resolve_ipv6_host(host, 22)
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.settimeout(8)
+        sock.connect(sockaddr)
+        client.connect(sockaddr[0], username=self.pi_user_input.text().strip(), password=self.pi_pass_input.text(), timeout=8, sock=sock)
         return client
 
     def _ssh_run(self, client, cmd: str):
@@ -318,13 +331,13 @@ class AnglerFishApp(QMainWindow):
         self.pi_pass_input = QLineEdit(self.pi_pass)
         self.pi_pass_input.setEchoMode(QLineEdit.Password)
 
-        form_layout.addRow("Host / IP Address:", self.pi_ip_input)
+        form_layout.addRow("Hostname:", self.pi_ip_input)
         form_layout.addRow("Username:", self.pi_user_input)
         form_layout.addRow("Password:", self.pi_pass_input)
 
         self.show_pass_check = QCheckBox("Show password")
         self.show_pass_check.toggled.connect(self._toggle_pass)
-        self.save_creds_check = QCheckBox("Save IP/User/Password")
+        self.save_creds_check = QCheckBox("Save Hostname/User/Password")
         self.save_creds_check.setChecked(self.save_creds)
         form_layout.addRow("", self.show_pass_check)
         form_layout.addRow("", self.save_creds_check)
@@ -350,10 +363,10 @@ class AnglerFishApp(QMainWindow):
 
     def _maybe_save_creds(self):
         cfg = load_config()
-        ip = self.pi_ip_input.text()
+        host = self.pi_ip_input.text()
         user = self.pi_user_input.text()
         pw = self.pi_pass_input.text()
-        cfg.update({"ip": ip, "user": user})
+        cfg.update({"host": host, "ip": host, "user": user})
         if self.save_creds_check.isChecked():
             cfg.update({"pass": pw, "save": True})
         else:

@@ -20,10 +20,9 @@ CMD_MAGIC = b"SUB1"
 
 
 def _resolve_udp_endpoint(host: str, port: int):
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    infos = socket.getaddrinfo(host, port, family=socket.AF_INET6, type=socket.SOCK_DGRAM)
     if not infos:
-        raise RuntimeError(f"Unable to resolve host '{host}'")
-    infos.sort(key=lambda i: 0 if i[0] == socket.AF_INET6 else 1)
+        raise RuntimeError(f"Unable to resolve IPv6 host '{host}'")
     family, _socktype, _proto, _canonname, sockaddr = infos[0]
     return family, sockaddr
 

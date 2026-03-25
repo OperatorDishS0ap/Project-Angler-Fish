@@ -2,6 +2,7 @@ import threading
 import time
 from typing import Optional
 import os
+import socket
 
 import cv2
 import numpy as np
@@ -54,7 +55,11 @@ class CameraClient:
             return None if self._latest_frame is None else self._latest_frame.copy()
 
     def _run(self) -> None:
-        host = self.host.strip()
+        host_input = self.host.strip()
+        infos = socket.getaddrinfo(host_input, self.port, family=socket.AF_INET6, type=socket.SOCK_STREAM)
+        if not infos:
+            raise RuntimeError(f"No IPv6 address found for host '{host_input}'")
+        host = infos[0][4][0]
         if ":" in host and not (host.startswith("[") and host.endswith("]")):
             host = f"[{host}]"
         url = f"rtsp://{host}:{self.port}/{self.path}"
