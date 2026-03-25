@@ -746,8 +746,6 @@ class MainWindow(QMainWindow):
     def _controller_poll_tick(self):
         if not self._try_initialize_controller():
             return
-        if self.udp_worker is None:
-            return
 
         try:
             pygame.event.pump()
@@ -830,7 +828,8 @@ class MainWindow(QMainWindow):
             "m4": self._clamp(m4 * 100.0, -100.0, 100.0),
             "arm": self.controller_armed,
         }
-        self.udp_worker.update_command(payload)
+        if self.udp_worker is not None:
+            self.udp_worker.update_command(payload)
 
         self.telemetry.m1 = int(payload["m1"])
         self.telemetry.m2 = int(payload["m2"])

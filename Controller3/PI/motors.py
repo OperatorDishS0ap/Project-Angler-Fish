@@ -2,6 +2,8 @@ import json
 import socket
 import struct
 import time
+import os
+import fcntl
 import pigpio
 
 # -------------------------
@@ -39,6 +41,8 @@ FORWARD_START = AVOID_HI + 1  # 1601
 
 ARM_TIME_S = 3.0
 LOOP_SLEEP_S = 0.005
+COMMAND_TIMEOUT_S = 1.0
+LOCK_PATH = "/tmp/anglerfish_motors.lock"
 
 # Small command deadband: treat tiny commands as neutral
 PCT_DEADBAND = 2.0  # percent
@@ -55,6 +59,18 @@ CMD_SIZE_OLD = struct.calcsize(CMD_FMT_OLD)
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def acquire_single_instance_lock(lock_path: str):
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        raise SystemExit("Another motors.py instance is already running")
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
 
 
 def connect_pigpio_with_retry(retries: int = 5, delay_s: float = 0.5) -> pigpio.pi:
@@ -146,6 +162,7 @@ def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pul
 
 
 def main():
+    lock_file = acquire_single_instance_lock(LOCK_PATH)
     pi = connect_pigpio_with_retry()
 
     # Setup all ESC outputs
@@ -174,6 +191,7 @@ def main():
     arm_requested = False
     arm_active = False
     arm_started_at = None
+    last_command_ts = time.time()
     pulse_min_us = PULSE_MIN
     pulse_max_us = PULSE_MAX
 
@@ -203,6 +221,7 @@ def main():
                         "m4": i16_to_pct(m4_i16),
                     }
                     arm_requested = arm_i16 > 0
+                    last_command_ts = time.time()
 
                 else:
                     # JSON fallback
@@ -226,12 +245,17 @@ def main():
                             "m4": float(msg.get("m4", last["m4"])),
                         }
                         arm_requested = bool(msg.get("arm", arm_requested))
+                        last_command_ts = time.time()
 
 
             except socket.timeout:
                 pass
             except Exception:
                 pass
+
+            if (time.time() - last_command_ts) > COMMAND_TIMEOUT_S:
+                arm_requested = False
+                last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
             # Arm/disarm state machine for ESC safety.
             if not arm_requested:
@@ -267,6 +291,14 @@ def main():
             pi = set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)
         time.sleep(0.5)
         pi.stop()
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock_file.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
