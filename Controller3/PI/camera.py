@@ -10,10 +10,10 @@ from libcamera import Transform
 # ----------------------------
 # Settings
 # ----------------------------
-WIDTH = 960
-HEIGHT = 540
-FPS = 30
-BITRATE = 1_500_000
+WIDTH = 1280
+HEIGHT = 720
+FPS = 60
+BITRATE = 3_000_000
 RTSP_URL = "rtsp://anglerfish.local:8554/cam"
 
 running = True
