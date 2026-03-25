@@ -248,22 +248,39 @@ class UdpLinkWorker(QThread):
             self.log_message.emit(f"Send error: {exc}")
 
     def run(self):
+        # --- Command socket (send-only, never needs to bind) ---
         try:
             self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._cmd_sock.setblocking(False)
+        except OSError as exc:
+            self.link_state.emit("UDP link failed")
+            self.log_message.emit(f"UDP command socket error: {exc}")
+            return
 
+        # --- Telemetry socket (receive-only, bind may fail gracefully) ---
+        telemetry_ok = False
+        try:
             self._telemetry_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._telemetry_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._telemetry_sock.bind(("0.0.0.0", self.telemetry_port))
             self._telemetry_sock.settimeout(0.1)
-            self.link_state.emit("UDP link ready")
-            self.log_message.emit(
-                f"Telemetry listener bound on 0.0.0.0:{self.telemetry_port}, sending commands to {self.pi_host}:{self.cmd_port}"
-            )
+            telemetry_ok = True
         except OSError as exc:
-            self.link_state.emit("UDP link failed")
-            self.log_message.emit(f"UDP setup error: {exc}")
-            return
+            self.log_message.emit(
+                f"Telemetry socket unavailable (sensor data disabled): {exc}"
+            )
+            if self._telemetry_sock is not None:
+                try:
+                    self._telemetry_sock.close()
+                except OSError:
+                    pass
+                self._telemetry_sock = None
+
+        self.link_state.emit("UDP link ready")
+        self.log_message.emit(
+            f"Sending commands to {self.pi_host}:{self.cmd_port} | "
+            f"Telemetry: {'listening on 0.0.0.0:' + str(self.telemetry_port) if telemetry_ok else 'DISABLED (port in use)'}"
+        )
 
         last_command_tx = 0.0
         while self._running:
@@ -272,20 +289,28 @@ class UdpLinkWorker(QThread):
                 self.send_json(self._build_motor_command_payload())
                 last_command_tx = now
 
-            try:
-                data, addr = self._telemetry_sock.recvfrom(8192)
-                payload = json.loads(data.decode("utf-8"))
-                if isinstance(payload, dict):
-                    self.telemetry_received.emit(self._normalize_telemetry_payload(payload))
-            except socket.timeout:
-                pass
-            except BlockingIOError:
-                pass
-            except json.JSONDecodeError as exc:
-                self.log_message.emit(f"Telemetry JSON error: {exc}")
-            except OSError as exc:
-                self.log_message.emit(f"Telemetry socket error: {exc}")
-                break
+            if self._telemetry_sock is not None:
+                try:
+                    data, addr = self._telemetry_sock.recvfrom(8192)
+                    payload = json.loads(data.decode("utf-8"))
+                    if isinstance(payload, dict):
+                        self.telemetry_received.emit(self._normalize_telemetry_payload(payload))
+                except socket.timeout:
+                    pass
+                except BlockingIOError:
+                    pass
+                except json.JSONDecodeError as exc:
+                    self.log_message.emit(f"Telemetry JSON error: {exc}")
+                except OSError as exc:
+                    self.log_message.emit(f"Telemetry socket error: {exc}")
+                    try:
+                        self._telemetry_sock.close()
+                    except OSError:
+                        pass
+                    self._telemetry_sock = None
+            else:
+                # No telemetry socket — sleep to avoid busy-spinning
+                time.sleep(0.05)
 
         for sock in (self._cmd_sock, self._telemetry_sock):
             if sock is not None:
@@ -767,8 +792,8 @@ class MainWindow(QMainWindow):
             return False
 
     def _start_controller_polling(self):
-        if self._try_initialize_controller():
-            self.controller_timer.start()
+        self._try_initialize_controller()  # best-effort; _controller_poll_tick retries each tick
+        self.controller_timer.start()
 
     def _stop_controller_polling(self):
         self.controller_timer.stop()
