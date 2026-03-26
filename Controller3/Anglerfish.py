@@ -60,7 +60,7 @@ from PySide6.QtWidgets import (
 # ============================================================
 @dataclass
 class TelemetryData:
-    timer_s: float = 75.0
+    timer_s: float = 0.0
     battery_v: float = 0.0
     pi_temp_c: float = 0.0
     video_fps: float = 0.0
@@ -188,7 +188,7 @@ class VideoWorker(QThread):
             if not self._frame_pending:
                 self._frame_pending = True
                 self.frame_ready.emit(image)
-            self.stats_ready.emit({"video_fps": fps})
+            self.stats_ready.emit({"decode_fps": fps})
 
         if self._capture is not None:
             self._capture.release()
@@ -755,6 +755,8 @@ class MainWindow(QMainWindow):
         self.controller_armed = False
         self.controller_a_last_press_time = 0.0
         self.controller_missing_logged = False
+        self._last_presented_ts: Optional[float] = None
+        self._presented_fps_ema = 0.0
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -882,6 +884,11 @@ class MainWindow(QMainWindow):
         # demo update timer for local UI test only
         self.demo_timer = QTimer(self)
         self.demo_timer.timeout.connect(self._demo_telemetry_tick)
+
+        self.connection_timer = QTimer(self)
+        self.connection_timer.setInterval(200)
+        self.connection_timer.timeout.connect(self._connection_timer_tick)
+        self._link_start_time: Optional[float] = None
 
         self.controller_timer = QTimer(self)
         self.controller_timer.setInterval(33)
@@ -1209,7 +1216,11 @@ class MainWindow(QMainWindow):
         self.connection_box.setVisible(False)
         self.disconnect_only_widget.setVisible(True)
         self.link_ready = False
+        self._link_start_time = None
+        self.connection_timer.stop()
+        self.telemetry.timer_s = 0.0
         self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
         self.status_bar.showMessage("Connecting to Pi...", 3000)
         self.log_tab.append_log("Connection started")
         self._update_video_overlay()
@@ -1236,6 +1247,8 @@ class MainWindow(QMainWindow):
         self.connection_box.setVisible(True)
         self.disconnect_only_widget.setVisible(False)
         self.link_ready = False
+        self.connection_timer.stop()
+        self._link_start_time = None
         self._update_arm_buttons()
         self.video_status.setText("Video: idle")
         self.link_status.setText("UDP: idle")
@@ -1245,6 +1258,23 @@ class MainWindow(QMainWindow):
 
     @Slot(QImage)
     def on_video_frame(self, image: QImage):
+        now = time.monotonic()
+        if self._last_presented_ts is None:
+            self._presented_fps_ema = 0.0
+        else:
+            dt = now - self._last_presented_ts
+            if 0.001 <= dt <= 2.0:
+                fps_instant = 1.0 / dt
+                if self._presented_fps_ema <= 0.0:
+                    self._presented_fps_ema = fps_instant
+                else:
+                    alpha = 0.15
+                    self._presented_fps_ema = (
+                        alpha * fps_instant
+                    ) + ((1.0 - alpha) * self._presented_fps_ema)
+                self.telemetry.video_fps = max(0.0, min(120.0, self._presented_fps_ema))
+        self._last_presented_ts = now
+
         pixmap = QPixmap.fromImage(image)
         scaled = pixmap.scaled(
             self.video_label.size(),
@@ -1257,7 +1287,7 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def on_video_stats(self, stats: dict):
-        self.telemetry.video_fps = float(stats.get("video_fps", self.telemetry.video_fps))
+        _ = stats
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_video_overlay()
 
@@ -1271,10 +1301,25 @@ class MainWindow(QMainWindow):
         self.link_status.setText(f"UDP: {text}")
         if text == "UDP link ready":
             self.link_ready = True
+            self._link_start_time = time.monotonic()
+            self.telemetry.timer_s = 0.0
+            self.connection_timer.start()
         elif text in ("UDP link failed", "UDP link stopped"):
             self.link_ready = False
+            self.connection_timer.stop()
+            self._link_start_time = None
         self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
         self.log_tab.append_log(text)
+
+    @Slot()
+    def _connection_timer_tick(self):
+        if self._link_start_time is None:
+            return
+        self.telemetry.timer_s = max(0.0, time.monotonic() - self._link_start_time)
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
 
     @Slot(dict)
     def on_telemetry_packet(self, payload: dict):
