@@ -13,8 +13,8 @@ BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
 PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # used when ANGLERFISH_USE_BROADCAST=0
 PC_PORT = int(os.environ.get("ANGLERFISH_PC_PORT", "9001"))
 RATE_HZ = 30.0
-ENABLE_BAR30 = os.environ.get("ANGLERFISH_ENABLE_BAR30", "1") == "0"
-ENABLE_MPU6050 = os.environ.get("ANGLERFISH_ENABLE_MPU6050", "1") == "0"
+ENABLE_BAR30 = os.environ.get("ANGLERFISH_ENABLE_BAR30", "0") == "1"
+ENABLE_MPU6050 = os.environ.get("ANGLERFISH_ENABLE_MPU6050", "0") == "1"
 DEBUG = os.environ.get("ANGLERFISH_SENSOR_DEBUG", "1") == "1"
 
 # Minimum deltas required before publishing a new averaged telemetry packet.
@@ -136,6 +136,12 @@ def main():
 
         now = time.time()
         if now - window_start >= 1.0:
+            try:
+                with open("/sys/class/thermal/thermal_zone0/temp") as _tf:
+                    pi_temp_c = round(float(_tf.read().strip()) / 1000.0, 1)
+            except Exception:
+                pi_temp_c = 0.0
+
             avg_msg = {
                 "ts": now,
                 "type": "telemetry",
@@ -147,6 +153,7 @@ def main():
                     "enclosure_temp_c": round(_avg(samples["temp_enclosure"]), 3),
                     "speed_mps": round(_avg(samples["speed"]), 4),
                     "accel_mps2": round(_avg(samples["acceleration"]), 4),
+                    "pi_temp_c": pi_temp_c,
                 },
             }
 
