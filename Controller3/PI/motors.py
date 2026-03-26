@@ -29,8 +29,8 @@ ESC_FREQ_HZ = 400
 PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
 PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
 
-PULSE_MIN = 1250
-PULSE_MAX = 1750
+PULSE_MIN = 1375
+PULSE_MAX = 1625
 
 PULSE_NEUTRAL = 1460
 
