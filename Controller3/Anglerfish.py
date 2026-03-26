@@ -62,6 +62,8 @@ from PySide6.QtWidgets import (
 class TelemetryData:
     timer_s: float = 0.0
     battery_v: float = 0.0
+    current_a: float = 0.0
+    current_adc_v: float = 0.0
     pi_temp_c: float = 0.0
     video_fps: float = 0.0
 
@@ -69,6 +71,8 @@ class TelemetryData:
     pressure_bar: float = 0.0
     water_temp_c: float = 0.0
     enclosure_temp_c: float = 0.0
+    esc_temp_1_c: float = 0.0
+    esc_temp_2_c: float = 0.0
 
     speed_mps: float = 0.0
     accel_mps2: float = 0.0
@@ -94,6 +98,16 @@ class TuningData:
     camera_contrast: float = 1.0
     auto_reconnect_video: bool = True
     auto_reconnect_udp: bool = True
+    telemetry_send_hz: float = 2.0
+    ads1015_hz: float = 8.0
+    current_offset_v: float = 2.5
+    current_scale_a_per_v: float = 10.0
+    battery_divider_ratio: float = 2.58
+    esc_therm_beta: float = 3950.0
+    esc_therm_r_fixed_ohm: float = 10000.0
+    esc_therm_r0_ohm: float = 10000.0
+    esc_therm_t0_c: float = 25.0
+    esc_therm_to_gnd: bool = True
 
 
 # ============================================================
@@ -536,6 +550,9 @@ class TelemetryPanel(QWidget):
             [
                 ("timer_s", "Timer", self._format_timer),
                 ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
+                ("battery_v", "Battery", lambda v: f"{v:.2f} V"),
+                ("current_a", "Current", lambda v: f"{v:.2f} A"),
+                ("current_adc_v", "Current ADC", lambda v: f"{v:.3f} V"),
                 ("video_fps", "Video FPS", lambda v: f"{v:.1f}"),
             ],
         )
@@ -544,6 +561,8 @@ class TelemetryPanel(QWidget):
             [
                 ("pressure_bar", "Pressure", lambda v: f"{v:.2f}"),
                 ("water_temp_c", "Water Temp", lambda v: f"{v:.1f} C"),
+                ("esc_temp_1_c", "ESC Temp 1", lambda v: f"{v:.1f} C"),
+                ("esc_temp_2_c", "ESC Temp 2", lambda v: f"{v:.1f} C"),
             ],
         )
         motion = self._make_section(
@@ -662,6 +681,31 @@ class TuningTab(QWidget):
         link_form.addRow("Auto Reconnect Video", self.controls["auto_reconnect_video"])
         link_form.addRow("Auto Reconnect UDP", self.controls["auto_reconnect_udp"])
 
+        adc_box = SectionBox("ADC Sensor Tuning")
+        adc_form = QFormLayout(adc_box)
+        self.controls["telemetry_send_hz"] = self._double(0.1, 60.0, 0.1, 2.0)
+        self.controls["ads1015_hz"] = self._double(0.1, 200.0, 0.1, 8.0)
+        self.controls["current_offset_v"] = self._double(0.0, 3.3, 0.001, 2.5)
+        self.controls["current_scale_a_per_v"] = self._double(0.0, 500.0, 0.1, 10.0)
+        self.controls["battery_divider_ratio"] = self._double(0.1, 20.0, 0.01, 2.58)
+        self.controls["esc_therm_beta"] = self._double(1000.0, 10000.0, 1.0, 3950.0)
+        self.controls["esc_therm_r_fixed_ohm"] = self._double(100.0, 1000000.0, 100.0, 10000.0)
+        self.controls["esc_therm_r0_ohm"] = self._double(100.0, 1000000.0, 100.0, 10000.0)
+        self.controls["esc_therm_t0_c"] = self._double(-40.0, 150.0, 0.1, 25.0)
+        self.controls["esc_therm_to_gnd"] = QCheckBox()
+        self.controls["esc_therm_to_gnd"].setChecked(True)
+
+        adc_form.addRow("Telemetry Send Hz", self.controls["telemetry_send_hz"])
+        adc_form.addRow("ADS1015 Read Hz", self.controls["ads1015_hz"])
+        adc_form.addRow("Current Offset (V)", self.controls["current_offset_v"])
+        adc_form.addRow("Current Scale (A/V)", self.controls["current_scale_a_per_v"])
+        adc_form.addRow("Battery Divider Ratio", self.controls["battery_divider_ratio"])
+        adc_form.addRow("ESC Therm Beta", self.controls["esc_therm_beta"])
+        adc_form.addRow("ESC Therm Fixed R (ohm)", self.controls["esc_therm_r_fixed_ohm"])
+        adc_form.addRow("ESC Therm R0 (ohm)", self.controls["esc_therm_r0_ohm"])
+        adc_form.addRow("ESC Therm T0 (C)", self.controls["esc_therm_t0_c"])
+        adc_form.addRow("Thermistor To GND", self.controls["esc_therm_to_gnd"])
+
         buttons_row = QHBoxLayout()
         self.apply_btn = QPushButton("Apply Live")
         self.reset_btn = QPushButton("Reset Defaults")
@@ -672,6 +716,7 @@ class TuningTab(QWidget):
         root.addWidget(drive_box)
         root.addWidget(camera_box)
         root.addWidget(link_box)
+        root.addWidget(adc_box)
         root.addLayout(buttons_row)
         root.addStretch(1)
 
@@ -1336,6 +1381,50 @@ class MainWindow(QMainWindow):
         self.log_tab.append_log(f"Live tuning update: {tuning}")
         if self.udp_worker is not None:
             self.udp_worker.update_tuning(tuning)
+        self._push_sensor_tuning_to_pi(tuning)
+
+    def _push_sensor_tuning_to_pi(self, tuning: dict):
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+        if not pi_host or not pi_password or paramiko is None:
+            return
+
+        sensor_tuning = {
+            "telemetry_send_hz": float(tuning.get("telemetry_send_hz", 2.0)),
+            "ads1015_hz": float(tuning.get("ads1015_hz", 8.0)),
+            "current_offset_v": float(tuning.get("current_offset_v", 2.5)),
+            "current_scale_a_per_v": float(tuning.get("current_scale_a_per_v", 10.0)),
+            "battery_divider_ratio": float(tuning.get("battery_divider_ratio", 2.58)),
+            "esc_therm_beta": float(tuning.get("esc_therm_beta", 3950.0)),
+            "esc_therm_r_fixed_ohm": float(tuning.get("esc_therm_r_fixed_ohm", 10000.0)),
+            "esc_therm_r0_ohm": float(tuning.get("esc_therm_r0_ohm", 10000.0)),
+            "esc_therm_t0_c": float(tuning.get("esc_therm_t0_c", 25.0)),
+            "esc_therm_to_gnd": bool(tuning.get("esc_therm_to_gnd", True)),
+        }
+
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=pi_host,
+                username=pi_user,
+                password=pi_password,
+                timeout=6,
+                auth_timeout=6,
+                banner_timeout=6,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            sftp = client.open_sftp()
+            remote_path = "/home/pi/anglerfish/sensor_tuning.json"
+            with sftp.file(remote_path, "w") as fh:
+                fh.write(json.dumps(sensor_tuning, indent=2, sort_keys=True))
+            sftp.close()
+            client.close()
+            self.log_tab.append_log(f"Sensor tuning pushed to {pi_host} ({remote_path})")
+        except Exception as exc:
+            self.log_tab.append_log(f"Sensor tuning push failed: {exc}")
 
     @Slot(float)
     def on_pi_temp_update(self, temp_c: float):

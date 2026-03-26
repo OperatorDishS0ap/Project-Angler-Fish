@@ -7,6 +7,7 @@ import time
 import math
 from bar30_sensor import init_bar30, read_bar30
 from mpu6050_sensor import init_imu_with_retry, read_imu
+from ads1015_sensor import init_ads1015, read_ads1015, apply_ads1015_tuning
 
 USE_BROADCAST = os.environ.get("ANGLERFISH_USE_BROADCAST", "1") == "1"
 BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
@@ -14,6 +15,7 @@ PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # used when ANGLERF
 PC_PORT = int(os.environ.get("ANGLERFISH_PC_PORT", "9001"))
 ENABLE_BAR30 = os.environ.get("ANGLERFISH_ENABLE_BAR30", "0") == "1"
 ENABLE_MPU6050 = os.environ.get("ANGLERFISH_ENABLE_MPU6050", "0") == "1"
+ENABLE_ADS1015 = os.environ.get("ANGLERFISH_ENABLE_ADS1015", "1") == "1"
 DEBUG = os.environ.get("ANGLERFISH_SENSOR_DEBUG", "1") == "1"
 
 TELEMETRY_SEND_HZ = float(os.environ.get("ANGLERFISH_TELEMETRY_SEND_HZ", "2.0"))
@@ -21,26 +23,41 @@ BAR30_HZ = float(os.environ.get("ANGLERFISH_BAR30_HZ", "2.0"))
 MPU6050_HZ = float(os.environ.get("ANGLERFISH_MPU6050_HZ", "20.0"))
 PI_TEMP_HZ = float(os.environ.get("ANGLERFISH_PI_TEMP_HZ", "2.0"))
 BATTERY_HZ = float(os.environ.get("ANGLERFISH_BATTERY_HZ", "2.0"))
+ADS1015_HZ = float(os.environ.get("ANGLERFISH_ADS1015_HZ", "8.0"))
+SENSOR_TUNING_PATH = os.environ.get("ANGLERFISH_SENSOR_TUNING_PATH", "/home/pi/anglerfish/sensor_tuning.json")
 
 
 def _hz_to_interval(hz: float, min_hz: float = 0.1) -> float:
     return 1.0 / max(min_hz, hz)
 
 
+def _read_sensor_tuning(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 
 def main():
     sensor = init_bar30() if ENABLE_BAR30 else None
     imu = init_imu_with_retry() if ENABLE_MPU6050 else None
+    ads = init_ads1015() if ENABLE_ADS1015 else None
 
     print(
         f"[sensors] Sensor toggles: BAR30={'ON' if ENABLE_BAR30 else 'OFF'} "
-        f"MPU6050={'ON' if ENABLE_MPU6050 else 'OFF'}"
+        f"MPU6050={'ON' if ENABLE_MPU6050 else 'OFF'} "
+        f"ADS1015={'ON' if ENABLE_ADS1015 else 'OFF'}"
     )
 
     if ENABLE_BAR30 and sensor is None:
         print("[sensors] BAR30 enabled but unavailable; publishing zeros for BAR30 fields")
     if ENABLE_MPU6050 and imu is None:
         print("[sensors] MPU6050 enabled but unavailable; publishing zeros for MPU fields")
+    if ENABLE_ADS1015 and ads is None:
+        print("[sensors] ADS1015 enabled but unavailable; publishing zeros for ADC fields")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     if USE_BROADCAST:
@@ -53,7 +70,7 @@ def main():
         print(
             "[sensors] Rates (Hz): "
             f"send={TELEMETRY_SEND_HZ}, bar30={BAR30_HZ}, mpu6050={MPU6050_HZ}, "
-            f"pi_temp={PI_TEMP_HZ}, battery={BATTERY_HZ}"
+            f"pi_temp={PI_TEMP_HZ}, battery={BATTERY_HZ}, ads1015={ADS1015_HZ}"
         )
 
     send_interval = _hz_to_interval(TELEMETRY_SEND_HZ)
@@ -61,6 +78,8 @@ def main():
     mpu_interval = _hz_to_interval(MPU6050_HZ)
     pi_temp_interval = _hz_to_interval(PI_TEMP_HZ)
     battery_interval = _hz_to_interval(BATTERY_HZ)
+    ads_interval = _hz_to_interval(ADS1015_HZ)
+    tuning_reload_interval = 1.0
 
     loop_sleep_s = 0.01
     speed = 0.0  # Integrated speed from acceleration
@@ -72,8 +91,12 @@ def main():
         "pressure_bar": 0.0,
         "water_temp_c": 0.0,
         "enclosure_temp_c": 0.0,
+        "esc_temp_1_c": 0.0,
+        "esc_temp_2_c": 0.0,
         "speed_mps": 0.0,
         "accel_mps2": 0.0,
+        "current_a": 0.0,
+        "current_adc_v": 0.0,
         "pi_temp_c": 0.0,
     }
 
@@ -83,12 +106,45 @@ def main():
     next_mpu_ts = now
     next_pi_temp_ts = now
     next_battery_ts = now
+    next_ads_ts = now
+    next_tuning_reload_ts = now
 
     last_mpu_update_ts = now
     last_imu_reconnect_try = 0.0
+    last_ads_reconnect_try = 0.0
+    last_tuning_mtime = 0.0
 
     while True:
         now = time.time()
+
+        if now >= next_tuning_reload_ts:
+            try:
+                mtime = os.path.getmtime(SENSOR_TUNING_PATH)
+            except OSError:
+                mtime = 0.0
+
+            if mtime > 0.0 and mtime != last_tuning_mtime:
+                tuning = _read_sensor_tuning(SENSOR_TUNING_PATH)
+
+                send_hz = float(tuning.get("telemetry_send_hz", TELEMETRY_SEND_HZ))
+                bar30_hz = float(tuning.get("bar30_hz", BAR30_HZ))
+                mpu_hz = float(tuning.get("mpu6050_hz", MPU6050_HZ))
+                pi_temp_hz = float(tuning.get("pi_temp_hz", PI_TEMP_HZ))
+                battery_hz = float(tuning.get("battery_hz", BATTERY_HZ))
+                ads_hz = float(tuning.get("ads1015_hz", ADS1015_HZ))
+
+                send_interval = _hz_to_interval(send_hz)
+                bar30_interval = _hz_to_interval(bar30_hz)
+                mpu_interval = _hz_to_interval(mpu_hz)
+                pi_temp_interval = _hz_to_interval(pi_temp_hz)
+                battery_interval = _hz_to_interval(battery_hz)
+                ads_interval = _hz_to_interval(ads_hz)
+
+                apply_ads1015_tuning(tuning)
+                last_tuning_mtime = mtime
+                print(f"[sensors] Loaded tuning from {SENSOR_TUNING_PATH}")
+
+            next_tuning_reload_ts = now + tuning_reload_interval
 
         if now >= next_bar30_ts:
             if ENABLE_BAR30:
@@ -140,8 +196,24 @@ def main():
             next_pi_temp_ts = now + pi_temp_interval
 
         if now >= next_battery_ts:
-            telemetry["battery_v"] = round(12.0 + (0.2 * random.random()), 3)
+            if not ENABLE_ADS1015:
+                telemetry["battery_v"] = round(12.0 + (0.2 * random.random()), 3)
             next_battery_ts = now + battery_interval
+
+        if now >= next_ads_ts:
+            if ads is not None:
+                esc1_c, esc2_c, battery_v, current_a, current_adc_v = read_ads1015(ads)
+                telemetry["esc_temp_1_c"] = round(float(esc1_c), 2)
+                telemetry["esc_temp_2_c"] = round(float(esc2_c), 2)
+                telemetry["battery_v"] = round(float(battery_v), 3)
+                telemetry["current_a"] = round(float(current_a), 3)
+                telemetry["current_adc_v"] = round(float(current_adc_v), 3)
+
+            if ENABLE_ADS1015 and ads is None and (now - last_ads_reconnect_try) >= 2.0:
+                last_ads_reconnect_try = now
+                ads = init_ads1015()
+
+            next_ads_ts = now + ads_interval
 
         if now >= next_send_ts:
             payload = {
@@ -154,7 +226,8 @@ def main():
                 if DEBUG:
                     print(
                         f"[sensors] Sent telemetry to {target_ip}:{PC_PORT}: "
-                        f"pi_temp_c={telemetry['pi_temp_c']}, battery_v={telemetry['battery_v']}"
+                        f"pi_temp_c={telemetry['pi_temp_c']}, battery_v={telemetry['battery_v']}, "
+                        f"current_a={telemetry['current_a']}"
                     )
             except Exception as exc:
                 print(f"[sensors] ERROR sending telemetry: {exc}")
