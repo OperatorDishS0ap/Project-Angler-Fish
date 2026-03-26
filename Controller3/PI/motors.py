@@ -168,12 +168,14 @@ def read_power_state(path: str):
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return None, False
+            return None, False, False, None
         battery_v = data.get("battery_v")
-        cutoff_active = bool(data.get("battery_cutoff_active", False))
-        return battery_v, cutoff_active
+        battery_cutoff_active = bool(data.get("battery_cutoff_active", False))
+        esc_overtemp_active = bool(data.get("esc_overtemp_active", False))
+        esc_max_temp_c = data.get("esc_max_temp_c")
+        return battery_v, battery_cutoff_active, esc_overtemp_active, esc_max_temp_c
     except Exception:
-        return None, False
+        return None, False, False, None
 
 
 def main():
@@ -210,7 +212,9 @@ def main():
     pulse_min_us = PULSE_MIN
     pulse_max_us = PULSE_MAX
     battery_cutoff_active = False
+    esc_overtemp_active = False
     last_battery_v = None
+    last_esc_temp_c = None
     last_power_state_check = 0.0
 
     print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
@@ -274,26 +278,39 @@ def main():
             now = time.time()
             if (now - last_power_state_check) >= max(0.02, POWER_STATE_CHECK_S):
                 last_power_state_check = now
-                battery_v, cutoff_state = read_power_state(POWER_STATE_PATH)
+                battery_v, battery_cutoff_state, esc_overtemp_state, esc_max_temp_c = read_power_state(POWER_STATE_PATH)
                 if battery_v is not None:
                     try:
                         last_battery_v = float(battery_v)
                     except Exception:
                         pass
+                if esc_max_temp_c is not None:
+                    try:
+                        last_esc_temp_c = float(esc_max_temp_c)
+                    except Exception:
+                        pass
 
-                if cutoff_state and not battery_cutoff_active:
+                if battery_cutoff_state and not battery_cutoff_active:
                     msg_v = f"{last_battery_v:.3f}V" if last_battery_v is not None else "unknown voltage"
                     print(f"[sub_motors_400hz] Battery cutoff ACTIVE ({msg_v}); motor output blocked.")
-                elif (not cutoff_state) and battery_cutoff_active:
+                elif (not battery_cutoff_state) and battery_cutoff_active:
                     msg_v = f"{last_battery_v:.3f}V" if last_battery_v is not None else "unknown voltage"
                     print(f"[sub_motors_400hz] Battery cutoff CLEARED ({msg_v}); motor output allowed.")
-                battery_cutoff_active = cutoff_state
+                battery_cutoff_active = battery_cutoff_state
+
+                if esc_overtemp_state and not esc_overtemp_active:
+                    msg_t = f"{last_esc_temp_c:.2f}C" if last_esc_temp_c is not None else "unknown temp"
+                    print(f"[sub_motors_400hz] ESC overtemp ACTIVE ({msg_t}); motor output blocked.")
+                elif (not esc_overtemp_state) and esc_overtemp_active:
+                    msg_t = f"{last_esc_temp_c:.2f}C" if last_esc_temp_c is not None else "unknown temp"
+                    print(f"[sub_motors_400hz] ESC overtemp CLEARED ({msg_t}); motor output allowed.")
+                esc_overtemp_active = esc_overtemp_state
 
             if (time.time() - last_command_ts) > COMMAND_TIMEOUT_S:
                 arm_requested = False
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
-            if battery_cutoff_active:
+            if battery_cutoff_active or esc_overtemp_active:
                 arm_requested = False
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 

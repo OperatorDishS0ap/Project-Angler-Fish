@@ -62,6 +62,8 @@ class TelemetryData:
     timer_s: float = 0.0
     battery_v: float = 0.0
     battery_cutoff_active: bool = False
+    esc_overtemp_active: bool = False
+    esc_max_temp_c: float = 0.0
     current_a: float = 0.0
     current_adc_v: float = 0.0
     pi_temp_c: float = 0.0
@@ -84,8 +86,6 @@ class TelemetryData:
 
     armed: bool = False
 
-
-@dataclass
 class VideoWorker(QThread):
     frame_ready = Signal(QImage)
     stats_ready = Signal(dict)
@@ -511,11 +511,11 @@ class TelemetryPanel(QWidget):
             [
                 ("timer_s", "Timer", self._format_timer),
                 ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
-                ("battery_v", "Battery", lambda v: f"{v:.2f} V"),
                 ("battery_cutoff_active", "Battery Cutoff", lambda v: "ACTIVE" if bool(v) else "OK"),
+                ("esc_overtemp_active", "ESC Overtemp", lambda v: "ACTIVE" if bool(v) else "OK"),
+                ("esc_max_temp_c", "ESC Max Temp", lambda v: f"{v:.1f} C"),
                 ("current_a", "Current", lambda v: f"{v:.2f} A"),
                 ("current_adc_v", "Current ADC", lambda v: f"{v:.3f} V"),
-                ("video_fps", "Video FPS", lambda v: f"{v:.1f}"),
             ],
         )
         environment = self._make_section(
@@ -594,6 +594,20 @@ class TelemetryPanel(QWidget):
         for key, label in self.labels.items():
             formatter = label.property("formatter")
             label.setText(formatter(data.get(key, 0)))
+
+        if "battery_cutoff_active" in self.labels:
+            self.labels["battery_cutoff_active"].setStyleSheet(
+                "font-size: 14px; font-weight: 700; color: #ff4040;"
+                if bool(telemetry.battery_cutoff_active)
+                else "font-size: 14px; font-weight: 700; color: #20d070;"
+            )
+        if "esc_overtemp_active" in self.labels:
+            self.labels["esc_overtemp_active"].setStyleSheet(
+                "font-size: 14px; font-weight: 700; color: #ff4040;"
+                if bool(telemetry.esc_overtemp_active)
+                else "font-size: 14px; font-weight: 700; color: #20d070;"
+            )
+
         self.arm_label.setText("ARMED" if telemetry.armed else "DISARMED")
         self.arm_label.setStyleSheet(self._arm_style(telemetry.armed))
 
@@ -1203,15 +1217,22 @@ class MainWindow(QMainWindow):
     def on_telemetry_packet(self, payload: dict):
         data = payload.get("telemetry", payload)
         prev_cutoff_state = bool(self.telemetry.battery_cutoff_active)
+        prev_overtemp_state = bool(self.telemetry.esc_overtemp_active)
         for key in asdict(self.telemetry).keys():
             if key in data:
                 setattr(self.telemetry, key, data[key])
         new_cutoff_state = bool(self.telemetry.battery_cutoff_active)
+        new_overtemp_state = bool(self.telemetry.esc_overtemp_active)
         if new_cutoff_state != prev_cutoff_state:
             if new_cutoff_state:
                 self.log_tab.append_log("Battery cutoff ACTIVE: motor movement blocked on Pi")
             else:
                 self.log_tab.append_log("Battery cutoff CLEARED: motor movement restored")
+        if new_overtemp_state != prev_overtemp_state:
+            if new_overtemp_state:
+                self.log_tab.append_log("ESC overtemp ACTIVE: motor movement blocked on Pi")
+            else:
+                self.log_tab.append_log("ESC overtemp CLEARED: motor movement restored")
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
         self._update_video_overlay()

@@ -27,6 +27,8 @@ BATTERY_HZ = float(os.environ.get("ANGLERFISH_BATTERY_HZ", "2.0"))
 ADS1015_HZ = float(os.environ.get("ANGLERFISH_ADS1015_HZ", "8.0"))
 BATTERY_CUTOFF_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_V", "7.2"))
 BATTERY_CUTOFF_CLEAR_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_CLEAR_V", "7.3"))
+ESC_OVERTEMP_C = float(os.environ.get("ANGLERFISH_ESC_OVERTEMP_C", "90.0"))
+ESC_OVERTEMP_CLEAR_C = float(os.environ.get("ANGLERFISH_ESC_OVERTEMP_CLEAR_C", "85.0"))
 BATTERY_EMA_ALPHA = float(os.environ.get("ANGLERFISH_BATTERY_EMA_ALPHA", "0.2"))
 POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
 
@@ -42,11 +44,13 @@ def _ema(prev_value: Optional[float], sample: float, alpha: float) -> float:
     return (a * float(sample)) + ((1.0 - a) * float(prev_value))
 
 
-def _write_power_state(path: str, battery_v: float, cutoff_active: bool):
+def _write_power_state(path: str, battery_v: float, cutoff_active: bool, esc_overtemp_active: bool, esc_max_temp_c: float):
     payload = {
         "ts": time.time(),
         "battery_v": float(battery_v),
         "battery_cutoff_active": bool(cutoff_active),
+        "esc_overtemp_active": bool(esc_overtemp_active),
+        "esc_max_temp_c": float(esc_max_temp_c),
     }
     tmp_path = f"{path}.tmp"
     try:
@@ -113,6 +117,8 @@ def main():
         "enclosure_temp_c": 0.0,
         "esc_temp_1_c": 0.0,
         "esc_temp_2_c": 0.0,
+        "esc_max_temp_c": 0.0,
+        "esc_overtemp_active": False,
         "speed_mps": 0.0,
         "accel_mps2": 0.0,
         "current_a": 0.0,
@@ -134,6 +140,7 @@ def main():
     last_ads_reconnect_try = 0.0
     battery_filtered_v: Optional[float] = None
     battery_cutoff_active = False
+    esc_overtemp_active = False
 
     while True:
         now = time.time()
@@ -219,6 +226,16 @@ def main():
             print(f"[sensors] Battery cutoff cleared at {battery_v_now:.3f}V")
         telemetry["battery_cutoff_active"] = battery_cutoff_active
 
+        esc_max_temp_c = max(float(telemetry.get("esc_temp_1_c", 0.0)), float(telemetry.get("esc_temp_2_c", 0.0)))
+        if not esc_overtemp_active and esc_max_temp_c >= ESC_OVERTEMP_C:
+            esc_overtemp_active = True
+            print(f"[sensors] ESC overtemp activated at {esc_max_temp_c:.2f}C")
+        elif esc_overtemp_active and esc_max_temp_c <= ESC_OVERTEMP_CLEAR_C:
+            esc_overtemp_active = False
+            print(f"[sensors] ESC overtemp cleared at {esc_max_temp_c:.2f}C")
+        telemetry["esc_max_temp_c"] = round(esc_max_temp_c, 2)
+        telemetry["esc_overtemp_active"] = esc_overtemp_active
+
         if now >= next_send_ts:
             payload = {
                 "ts": now,
@@ -227,7 +244,13 @@ def main():
             }
             try:
                 sock.sendto(json.dumps(payload).encode("utf-8"), (target_ip, PC_PORT))
-                _write_power_state(POWER_STATE_PATH, battery_v_now, battery_cutoff_active)
+                _write_power_state(
+                    POWER_STATE_PATH,
+                    battery_v_now,
+                    battery_cutoff_active,
+                    esc_overtemp_active,
+                    esc_max_temp_c,
+                )
                 if DEBUG:
                     print(
                         f"[sensors] Sent telemetry to {target_ip}:{PC_PORT}: "
