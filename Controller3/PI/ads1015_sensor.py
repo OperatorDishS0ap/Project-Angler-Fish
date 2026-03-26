@@ -111,11 +111,12 @@ def init_ads1015():
         i2c = busio.I2C(board.SCL, board.SDA)
         ads = ADS.ADS1015(i2c, address=ADC_ADDRESS)
         ads.gain = ADC_GAIN
+        # Channel indices 0-3 work across all adafruit-ads1x15 library versions.
         channels = {
-            "ch0": AnalogIn(ads, ADS.P0),
-            "ch1": AnalogIn(ads, ADS.P1),
-            "ch2": AnalogIn(ads, ADS.P2),
-            "ch3": AnalogIn(ads, ADS.P3),
+            "ch0": AnalogIn(ads, 0),
+            "ch1": AnalogIn(ads, 1),
+            "ch2": AnalogIn(ads, 2),
+            "ch3": AnalogIn(ads, 3),
         }
         print(f"[ads1015] Initialized at 0x{ADC_ADDRESS:02x} gain={ADC_GAIN}")
         return channels
