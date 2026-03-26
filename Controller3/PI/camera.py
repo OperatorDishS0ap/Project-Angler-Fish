@@ -49,8 +49,8 @@ def main():
         iperiod=15,
     )
 
-    # Publish directly to MediaMTX over RTSP.
-    output = PyavOutput(RTSP_URL, format="rtsp")
+    # Publish directly to MediaMTX over RTSP using UDP transport for lower latency.
+    output = PyavOutput(RTSP_URL, format="rtsp", options={"rtsp_transport": "udp"})
 
     print("Starting camera...")
 
