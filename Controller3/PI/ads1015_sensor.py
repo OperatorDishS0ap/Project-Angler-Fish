@@ -24,7 +24,7 @@ THERM_R_FIXED_OHM = float(os.environ.get("ANGLERFISH_ESC_THERM_R_FIXED_OHM", "10
 THERM_R0_OHM = float(os.environ.get("ANGLERFISH_ESC_THERM_R0_OHM", "10000"))
 THERM_BETA = float(os.environ.get("ANGLERFISH_ESC_THERM_BETA", "3950"))
 THERM_T0_C = float(os.environ.get("ANGLERFISH_ESC_THERM_T0_C", "25.0"))
-THERM_TO_GND = os.environ.get("ANGLERFISH_ESC_THERM_TO_GND", "1") == "1"
+THERM_TO_GND = os.environ.get("ANGLERFISH_ESC_THERM_TO_GND", "0") == "1"
 
 # Battery and current scaling
 BATTERY_DIVIDER_RATIO = float(os.environ.get("ANGLERFISH_BATTERY_DIVIDER_RATIO", "2.58"))

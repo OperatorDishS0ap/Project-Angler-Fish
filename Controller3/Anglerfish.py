@@ -107,7 +107,7 @@ class TuningData:
     esc_therm_r_fixed_ohm: float = 10000.0
     esc_therm_r0_ohm: float = 10000.0
     esc_therm_t0_c: float = 25.0
-    esc_therm_to_gnd: bool = True
+    esc_therm_to_gnd: bool = False
 
 
 # ============================================================
@@ -693,7 +693,7 @@ class TuningTab(QWidget):
         self.controls["esc_therm_r0_ohm"] = self._double(100.0, 1000000.0, 100.0, 10000.0)
         self.controls["esc_therm_t0_c"] = self._double(-40.0, 150.0, 0.1, 25.0)
         self.controls["esc_therm_to_gnd"] = QCheckBox()
-        self.controls["esc_therm_to_gnd"].setChecked(True)
+        self.controls["esc_therm_to_gnd"].setChecked(False)
 
         adc_form.addRow("Telemetry Send Hz", self.controls["telemetry_send_hz"])
         adc_form.addRow("ADS1015 Read Hz", self.controls["ads1015_hz"])
