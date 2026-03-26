@@ -109,13 +109,52 @@ class VideoWorker(QThread):
         self.rtsp_url = rtsp_url
         self._running = True
         self._capture = None
+        self._frame_pending = False
+
+    def _configure_low_latency_capture(self):
+        if self._capture is None:
+            return
+
+        # Best-effort latency reduction; OpenCV backend support varies by platform/build.
+        for prop_name, value in (
+            ("CAP_PROP_BUFFERSIZE", 1),
+            ("CAP_PROP_OPEN_TIMEOUT_MSEC", 3000),
+            ("CAP_PROP_READ_TIMEOUT_MSEC", 1000),
+        ):
+            prop = getattr(cv2, prop_name, None)
+            if prop is not None:
+                try:
+                    self._capture.set(prop, value)
+                except Exception:
+                    pass
 
     def stop(self):
         self._running = False
 
+    @Slot()
+    def mark_frame_presented(self):
+        self._frame_pending = False
+
     def run(self):
         self.status_changed.emit("Opening video stream...")
-        self._capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        ffmpeg_capture_options = (
+            "rtsp_transport;udp|"
+            "fflags;nobuffer|"
+            "flags;low_delay|"
+            "max_delay;0|"
+            "reorder_queue_size;0"
+        )
+        previous_capture_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options
+        try:
+            self._capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        finally:
+            if previous_capture_options is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_capture_options
+
+        self._configure_low_latency_capture()
 
         if not self._capture.isOpened():
             self.status_changed.emit("Video stream failed to open")
@@ -146,7 +185,9 @@ class VideoWorker(QThread):
             h, w, ch = rgb.shape
             bytes_per_line = ch * w
             image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
-            self.frame_ready.emit(image)
+            if not self._frame_pending:
+                self._frame_pending = True
+                self.frame_ready.emit(image)
             self.stats_ready.emit({"video_fps": fps})
 
         if self._capture is not None:
@@ -697,6 +738,8 @@ class LogTab(QWidget):
 # Main window
 # ============================================================
 class MainWindow(QMainWindow):
+    frame_presented = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AnglerFish Control Station")
@@ -1146,6 +1189,7 @@ class MainWindow(QMainWindow):
         self.video_worker.frame_ready.connect(self.on_video_frame)
         self.video_worker.stats_ready.connect(self.on_video_stats)
         self.video_worker.status_changed.connect(self.on_video_status)
+        self.frame_presented.connect(self.video_worker.mark_frame_presented)
         self.video_worker.start()
 
         self.udp_worker = UdpLinkWorker(pi_host, cmd_port, telemetry_port, fallback_host=rtsp_host)
@@ -1209,6 +1253,7 @@ class MainWindow(QMainWindow):
         )
         self.video_label.setPixmap(scaled)
         self._position_video_overlays()
+        self.frame_presented.emit()
 
     @Slot(dict)
     def on_video_stats(self, stats: dict):
