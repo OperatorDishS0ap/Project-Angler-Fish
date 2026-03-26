@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import zipfile
 from urllib.parse import urlparse
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -815,7 +816,7 @@ class MainWindow(QMainWindow):
         preflight_action = QAction("Git Deploy Preflight Check", self)
         preflight_action.triggered.connect(self.git_deploy_preflight_check)
         tools_menu.addAction(preflight_action)
-        deploy_action = QAction("Deploy to Pi", self)
+        deploy_action = QAction("Offline Deploy to Pi", self)
         deploy_action.triggered.connect(self.deploy_pi_folder)
         tools_menu.addAction(deploy_action)
 
@@ -1289,7 +1290,10 @@ class MainWindow(QMainWindow):
             )
             return
 
-        method_note = "Files will be copied directly via SFTP (password auth)."
+        method_note = (
+            "Files will be copied directly over the local SSH link. "
+            "Paramiko SFTP is used when available; otherwise the app falls back to SSH/SCP."
+        )
 
         confirmation = QMessageBox.question(
             self,
@@ -1304,14 +1308,6 @@ class MainWindow(QMainWindow):
         if confirmation != QMessageBox.Yes:
             return
 
-        if pi_password and paramiko is None:
-            QMessageBox.critical(
-                self,
-                "Deploy Failed",
-                "Paramiko is required for password-based deploy.\nInstall with: pip install paramiko",
-            )
-            return
-
         self.status_bar.showMessage("Deploying to Pi...")
         self.log_tab.append_log(
             f"Deploy started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
@@ -1319,13 +1315,30 @@ class MainWindow(QMainWindow):
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            ok, message = self._deploy_via_sftp(
-                host=pi_host,
-                user=pi_user,
-                password=pi_password,
-                local_dir=local_dir,
-                remote_dir=remote_dir,
-            )
+            if paramiko is not None:
+                ok, message = self._deploy_via_sftp(
+                    host=pi_host,
+                    user=pi_user,
+                    password=pi_password,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+                if not ok:
+                    self.log_tab.append_log(f"SFTP deploy failed; trying SSH/SCP fallback: {message}")
+                    ok, message = self._deploy_via_scp_archive(
+                        host=pi_host,
+                        user=pi_user,
+                        local_dir=local_dir,
+                        remote_dir=remote_dir,
+                    )
+            else:
+                self.log_tab.append_log("Paramiko unavailable; falling back to SSH/SCP deploy")
+                ok, message = self._deploy_via_scp_archive(
+                    host=pi_host,
+                    user=pi_user,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -1608,6 +1621,68 @@ class MainWindow(QMainWindow):
                 return False, f"{error_text}\nHint: {hint}"
             return False, error_text
 
+    def _deploy_via_scp_archive(
+        self,
+        host: str,
+        user: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        """Copy a zip archive over SCP and unpack it on the Pi using the local SSH link."""
+        archive_path = None
+        remote_archive = f"/tmp/anglerfish_update_{int(time.time())}.zip"
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as archive_file:
+                archive_path = archive_file.name
+
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for local_file in sorted(local_dir.rglob("*")):
+                    if not local_file.is_file():
+                        continue
+                    archive.write(local_file, arcname=str(local_file.relative_to(local_dir)))
+
+            scp_args = self._build_scp_prefix() + [
+                archive_path,
+                f"{user}@{host}:{remote_archive}",
+            ]
+            ok, output = self._run_ssh_subprocess_command(
+                scp_args,
+                user=user,
+                host=host,
+                failure_text="SCP copy failed",
+                timeout=60,
+            )
+            if not ok:
+                return False, output
+
+            python_snippet = (
+                "import os, zipfile; "
+                f"os.makedirs({remote_dir!r}, exist_ok=True); "
+                f"zipfile.ZipFile({remote_archive!r}).extractall({remote_dir!r})"
+            )
+            unpack_command = (
+                f"mkdir -p {shlex.quote(remote_dir)} && "
+                f"python3 -c {shlex.quote(python_snippet)} && "
+                f"rm -f {shlex.quote(remote_archive)}"
+            )
+            ok, output = self._run_ssh_command(user, host, unpack_command)
+            if not ok:
+                return False, output
+
+            return True, "OK"
+        except Exception as exc:
+            error_text = str(exc)
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
+        finally:
+            if archive_path:
+                try:
+                    os.remove(archive_path)
+                except OSError:
+                    pass
+
     def _run_local_command(self, args: list[str], cwd: Optional[str] = None) -> tuple[bool, str]:
         result = subprocess.run(
             args,
@@ -1684,6 +1759,19 @@ class MainWindow(QMainWindow):
             f"{user}@{host}",
         ]
 
+    def _build_scp_prefix(self) -> list[str]:
+        return [
+            "scp",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "PreferredAuthentications=publickey,password,keyboard-interactive",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=8",
+        ]
+
     def _get_ssh_password(self) -> str:
         return self.pi_password_edit.text()
 
@@ -1714,43 +1802,48 @@ class MainWindow(QMainWindow):
     def _run_ssh_command(self, user: str, host: str, command: str) -> tuple[bool, str]:
         password = self._get_ssh_password()
         if password:
-            if paramiko is None:
-                return (
-                    False,
-                    "SSH password was provided, but Paramiko is not installed. Install with: pip install paramiko",
-                )
-            try:
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(
-                    hostname=host,
-                    username=user,
-                    password=password,
-                    timeout=8,
-                    auth_timeout=8,
-                    banner_timeout=8,
-                    look_for_keys=False,
-                    allow_agent=False,
-                )
-                stdin, stdout, stderr = client.exec_command(command, timeout=25)
-                _ = stdin
-                out_text = stdout.read().decode("utf-8", errors="replace").strip()
-                err_text = stderr.read().decode("utf-8", errors="replace").strip()
-                exit_code = stdout.channel.recv_exit_status()
-                client.close()
-                if exit_code != 0:
-                    error_text = err_text or out_text or "SSH command failed"
+            if paramiko is not None:
+                try:
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    client.connect(
+                        hostname=host,
+                        username=user,
+                        password=password,
+                        timeout=8,
+                        auth_timeout=8,
+                        banner_timeout=8,
+                        look_for_keys=False,
+                        allow_agent=False,
+                    )
+                    stdin, stdout, stderr = client.exec_command(command, timeout=25)
+                    _ = stdin
+                    out_text = stdout.read().decode("utf-8", errors="replace").strip()
+                    err_text = stderr.read().decode("utf-8", errors="replace").strip()
+                    exit_code = stdout.channel.recv_exit_status()
+                    client.close()
+                    if exit_code != 0:
+                        error_text = err_text or out_text or "SSH command failed"
+                        hint = self._classify_ssh_error(user, host, error_text)
+                        if hint:
+                            return False, f"{error_text}\nHint: {hint}"
+                        return False, error_text
+                    return True, out_text
+                except Exception as exc:
+                    error_text = str(exc)
                     hint = self._classify_ssh_error(user, host, error_text)
                     if hint:
                         return False, f"{error_text}\nHint: {hint}"
                     return False, error_text
-                return True, out_text
-            except Exception as exc:
-                error_text = str(exc)
-                hint = self._classify_ssh_error(user, host, error_text)
-                if hint:
-                    return False, f"{error_text}\nHint: {hint}"
-                return False, error_text
+
+            ssh_prefix = self._build_ssh_prefix(user, host)
+            return self._run_ssh_subprocess_command(
+                ssh_prefix + [command],
+                user=user,
+                host=host,
+                failure_text="SSH command failed",
+                timeout=25,
+            )
 
         ssh_prefix = self._build_ssh_prefix(user, host)
         result = subprocess.run(
@@ -1766,6 +1859,56 @@ class MainWindow(QMainWindow):
                 return False, f"{error_text}\nHint: {hint}"
             return False, error_text
         return True, (result.stdout or "").strip()
+
+    def _run_ssh_subprocess_command(
+        self,
+        args: list[str],
+        user: str,
+        host: str,
+        failure_text: str,
+        timeout: int,
+    ) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        askpass_path = None
+        try:
+            env = os.environ.copy()
+            if password:
+                with tempfile.NamedTemporaryFile("w", delete=False, suffix=".cmd", encoding="utf-8") as askpass_file:
+                    askpass_file.write("@echo off\r\n")
+                    askpass_file.write("echo %ANGLERFISH_SSH_PASSWORD%\r\n")
+                    askpass_path = askpass_file.name
+
+                env["ANGLERFISH_SSH_PASSWORD"] = password
+                env["SSH_ASKPASS"] = askpass_path
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                env["GIT_TERMINAL_PROMPT"] = "0"
+                env["DISPLAY"] = "anglerfish"
+
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or failure_text).strip()
+                hint = self._classify_ssh_error(user, host, error_text)
+                if hint:
+                    return False, f"{error_text}\nHint: {hint}"
+                return False, error_text
+            return True, (result.stdout or "").strip()
+        except FileNotFoundError:
+            return False, "Required executable not found (ssh/scp)"
+        except subprocess.TimeoutExpired:
+            return False, f"{failure_text} timed out"
+        finally:
+            if askpass_path:
+                try:
+                    os.remove(askpass_path)
+                except OSError:
+                    pass
 
     def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
         reboot_cmd = "nohup sh -c 'sleep 1; sudo reboot' >/dev/null 2>&1 &"
