@@ -43,6 +43,8 @@ ARM_TIME_S = 3.0
 LOOP_SLEEP_S = 0.005
 COMMAND_TIMEOUT_S = 1.0
 LOCK_PATH = "/tmp/anglerfish_motors.lock"
+POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
+POWER_STATE_CHECK_S = float(os.environ.get("ANGLERFISH_POWER_STATE_CHECK_S", "0.1"))
 
 # Small command deadband: treat tiny commands as neutral
 PCT_DEADBAND = 2.0  # percent
@@ -161,6 +163,19 @@ def set_pulse_us(pi: pigpio.pi, gpio: int, pulse_us: int, pulse_min_us: int, pul
     return pi
 
 
+def read_power_state(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return None, False
+        battery_v = data.get("battery_v")
+        cutoff_active = bool(data.get("battery_cutoff_active", False))
+        return battery_v, cutoff_active
+    except Exception:
+        return None, False
+
+
 def main():
     lock_file = acquire_single_instance_lock(LOCK_PATH)
     pi = connect_pigpio_with_retry()
@@ -194,6 +209,9 @@ def main():
     last_command_ts = time.time()
     pulse_min_us = PULSE_MIN
     pulse_max_us = PULSE_MAX
+    battery_cutoff_active = False
+    last_battery_v = None
+    last_power_state_check = 0.0
 
     print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
 
@@ -253,7 +271,29 @@ def main():
             except Exception:
                 pass
 
+            now = time.time()
+            if (now - last_power_state_check) >= max(0.02, POWER_STATE_CHECK_S):
+                last_power_state_check = now
+                battery_v, cutoff_state = read_power_state(POWER_STATE_PATH)
+                if battery_v is not None:
+                    try:
+                        last_battery_v = float(battery_v)
+                    except Exception:
+                        pass
+
+                if cutoff_state and not battery_cutoff_active:
+                    msg_v = f"{last_battery_v:.3f}V" if last_battery_v is not None else "unknown voltage"
+                    print(f"[sub_motors_400hz] Battery cutoff ACTIVE ({msg_v}); motor output blocked.")
+                elif (not cutoff_state) and battery_cutoff_active:
+                    msg_v = f"{last_battery_v:.3f}V" if last_battery_v is not None else "unknown voltage"
+                    print(f"[sub_motors_400hz] Battery cutoff CLEARED ({msg_v}); motor output allowed.")
+                battery_cutoff_active = cutoff_state
+
             if (time.time() - last_command_ts) > COMMAND_TIMEOUT_S:
+                arm_requested = False
+                last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
+
+            if battery_cutoff_active:
                 arm_requested = False
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 

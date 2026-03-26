@@ -32,41 +32,6 @@ CURRENT_OFFSET_V = float(os.environ.get("ANGLERFISH_CURRENT_OFFSET_V", "-0.026")
 CURRENT_SCALE_A_PER_V = float(os.environ.get("ANGLERFISH_CURRENT_SCALE_A_PER_V", "25.0"))
 
 
-def apply_ads1015_tuning(tuning: dict):
-    global THERM_R_FIXED_OHM
-    global THERM_R0_OHM
-    global THERM_BETA
-    global THERM_T0_C
-    global THERM_TO_GND
-    global BATTERY_DIVIDER_RATIO
-    global CURRENT_OFFSET_V
-    global CURRENT_SCALE_A_PER_V
-
-    if not isinstance(tuning, dict):
-        return
-
-    try:
-        if "esc_therm_r_fixed_ohm" in tuning:
-            THERM_R_FIXED_OHM = max(1.0, float(tuning["esc_therm_r_fixed_ohm"]))
-        if "esc_therm_r0_ohm" in tuning:
-            THERM_R0_OHM = max(1.0, float(tuning["esc_therm_r0_ohm"]))
-        if "esc_therm_beta" in tuning:
-            THERM_BETA = max(1.0, float(tuning["esc_therm_beta"]))
-        if "esc_therm_t0_c" in tuning:
-            THERM_T0_C = float(tuning["esc_therm_t0_c"])
-        if "esc_therm_to_gnd" in tuning:
-            THERM_TO_GND = bool(tuning["esc_therm_to_gnd"])
-
-        if "battery_divider_ratio" in tuning:
-            BATTERY_DIVIDER_RATIO = max(0.01, float(tuning["battery_divider_ratio"]))
-        if "current_offset_v" in tuning:
-            CURRENT_OFFSET_V = float(tuning["current_offset_v"])
-        if "current_scale_a_per_v" in tuning:
-            CURRENT_SCALE_A_PER_V = max(0.0, float(tuning["current_scale_a_per_v"]))
-    except Exception as exc:
-        print(f"[ads1015] Tuning update ignored due to invalid values: {exc}")
-
-
 def _safe_float(value: float, fallback: float = 0.0) -> float:
     try:
         return float(value)

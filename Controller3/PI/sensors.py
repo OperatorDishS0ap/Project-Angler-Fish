@@ -5,9 +5,10 @@ import random
 import socket
 import time
 import math
+from typing import Optional
 from bar30_sensor import init_bar30, read_bar30
 from mpu6050_sensor import init_imu_with_retry, read_imu
-from ads1015_sensor import init_ads1015, read_ads1015, apply_ads1015_tuning
+from ads1015_sensor import init_ads1015, read_ads1015
 
 USE_BROADCAST = os.environ.get("ANGLERFISH_USE_BROADCAST", "1") == "1"
 BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
@@ -24,20 +25,40 @@ MPU6050_HZ = float(os.environ.get("ANGLERFISH_MPU6050_HZ", "20.0"))
 PI_TEMP_HZ = float(os.environ.get("ANGLERFISH_PI_TEMP_HZ", "2.0"))
 BATTERY_HZ = float(os.environ.get("ANGLERFISH_BATTERY_HZ", "2.0"))
 ADS1015_HZ = float(os.environ.get("ANGLERFISH_ADS1015_HZ", "8.0"))
-SENSOR_TUNING_PATH = os.environ.get("ANGLERFISH_SENSOR_TUNING_PATH", "/home/pi/anglerfish/sensor_tuning.json")
+BATTERY_CUTOFF_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_V", "3.1"))
+BATTERY_CUTOFF_CLEAR_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_CLEAR_V", "3.2"))
+BATTERY_EMA_ALPHA = float(os.environ.get("ANGLERFISH_BATTERY_EMA_ALPHA", "0.2"))
+POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
 
 
 def _hz_to_interval(hz: float, min_hz: float = 0.1) -> float:
     return 1.0 / max(min_hz, hz)
 
 
-def _read_sensor_tuning(path: str) -> dict:
+def _ema(prev_value: Optional[float], sample: float, alpha: float) -> float:
+    if prev_value is None:
+        return float(sample)
+    a = max(0.0, min(1.0, alpha))
+    return (a * float(sample)) + ((1.0 - a) * float(prev_value))
+
+
+def _write_power_state(path: str, battery_v: float, cutoff_active: bool):
+    payload = {
+        "ts": time.time(),
+        "battery_v": float(battery_v),
+        "battery_cutoff_active": bool(cutoff_active),
+    }
+    tmp_path = f"{path}.tmp"
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp_path, path)
     except Exception:
-        return {}
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 
@@ -79,7 +100,6 @@ def main():
     pi_temp_interval = _hz_to_interval(PI_TEMP_HZ)
     battery_interval = _hz_to_interval(BATTERY_HZ)
     ads_interval = _hz_to_interval(ADS1015_HZ)
-    tuning_reload_interval = 1.0
 
     loop_sleep_s = 0.01
     speed = 0.0  # Integrated speed from acceleration
@@ -98,6 +118,7 @@ def main():
         "current_a": 0.0,
         "current_adc_v": 0.0,
         "pi_temp_c": 0.0,
+        "battery_cutoff_active": False,
     }
 
     now = time.time()
@@ -107,44 +128,15 @@ def main():
     next_pi_temp_ts = now
     next_battery_ts = now
     next_ads_ts = now
-    next_tuning_reload_ts = now
 
     last_mpu_update_ts = now
     last_imu_reconnect_try = 0.0
     last_ads_reconnect_try = 0.0
-    last_tuning_mtime = 0.0
+    battery_filtered_v: Optional[float] = None
+    battery_cutoff_active = False
 
     while True:
         now = time.time()
-
-        if now >= next_tuning_reload_ts:
-            try:
-                mtime = os.path.getmtime(SENSOR_TUNING_PATH)
-            except OSError:
-                mtime = 0.0
-
-            if mtime > 0.0 and mtime != last_tuning_mtime:
-                tuning = _read_sensor_tuning(SENSOR_TUNING_PATH)
-
-                send_hz = float(tuning.get("telemetry_send_hz", TELEMETRY_SEND_HZ))
-                bar30_hz = float(tuning.get("bar30_hz", BAR30_HZ))
-                mpu_hz = float(tuning.get("mpu6050_hz", MPU6050_HZ))
-                pi_temp_hz = float(tuning.get("pi_temp_hz", PI_TEMP_HZ))
-                battery_hz = float(tuning.get("battery_hz", BATTERY_HZ))
-                ads_hz = float(tuning.get("ads1015_hz", ADS1015_HZ))
-
-                send_interval = _hz_to_interval(send_hz)
-                bar30_interval = _hz_to_interval(bar30_hz)
-                mpu_interval = _hz_to_interval(mpu_hz)
-                pi_temp_interval = _hz_to_interval(pi_temp_hz)
-                battery_interval = _hz_to_interval(battery_hz)
-                ads_interval = _hz_to_interval(ads_hz)
-
-                apply_ads1015_tuning(tuning)
-                last_tuning_mtime = mtime
-                print(f"[sensors] Loaded tuning from {SENSOR_TUNING_PATH}")
-
-            next_tuning_reload_ts = now + tuning_reload_interval
 
         if now >= next_bar30_ts:
             if ENABLE_BAR30:
@@ -197,7 +189,9 @@ def main():
 
         if now >= next_battery_ts:
             if not ENABLE_ADS1015:
-                telemetry["battery_v"] = round(12.0 + (0.2 * random.random()), 3)
+                battery_sample_v = 12.0 + (0.2 * random.random())
+                battery_filtered_v = _ema(battery_filtered_v, battery_sample_v, BATTERY_EMA_ALPHA)
+                telemetry["battery_v"] = round(float(battery_filtered_v), 3)
             next_battery_ts = now + battery_interval
 
         if now >= next_ads_ts:
@@ -205,7 +199,8 @@ def main():
                 esc1_c, esc2_c, battery_v, current_a, current_adc_v = read_ads1015(ads)
                 telemetry["esc_temp_1_c"] = round(float(esc1_c), 2)
                 telemetry["esc_temp_2_c"] = round(float(esc2_c), 2)
-                telemetry["battery_v"] = round(float(battery_v), 3)
+                battery_filtered_v = _ema(battery_filtered_v, float(battery_v), BATTERY_EMA_ALPHA)
+                telemetry["battery_v"] = round(float(battery_filtered_v), 3)
                 telemetry["current_a"] = round(float(current_a), 3)
                 telemetry["current_adc_v"] = round(float(current_adc_v), 3)
 
@@ -215,6 +210,15 @@ def main():
 
             next_ads_ts = now + ads_interval
 
+        battery_v_now = float(telemetry.get("battery_v", 0.0))
+        if not battery_cutoff_active and battery_v_now <= BATTERY_CUTOFF_V:
+            battery_cutoff_active = True
+            print(f"[sensors] Battery cutoff activated at {battery_v_now:.3f}V")
+        elif battery_cutoff_active and battery_v_now >= BATTERY_CUTOFF_CLEAR_V:
+            battery_cutoff_active = False
+            print(f"[sensors] Battery cutoff cleared at {battery_v_now:.3f}V")
+        telemetry["battery_cutoff_active"] = battery_cutoff_active
+
         if now >= next_send_ts:
             payload = {
                 "ts": now,
@@ -223,6 +227,7 @@ def main():
             }
             try:
                 sock.sendto(json.dumps(payload).encode("utf-8"), (target_ip, PC_PORT))
+                _write_power_state(POWER_STATE_PATH, battery_v_now, battery_cutoff_active)
                 if DEBUG:
                     print(
                         f"[sensors] Sent telemetry to {target_ip}:{PC_PORT}: "

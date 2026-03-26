@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -62,6 +61,7 @@ from PySide6.QtWidgets import (
 class TelemetryData:
     timer_s: float = 0.0
     battery_v: float = 0.0
+    battery_cutoff_active: bool = False
     current_a: float = 0.0
     current_adc_v: float = 0.0
     pi_temp_c: float = 0.0
@@ -86,21 +86,6 @@ class TelemetryData:
 
 
 @dataclass
-class TuningData:
-    deadzone: float = 0.08
-    trigger_scale: float = 1.00
-    yaw_scale: float = 1.00
-    strafe_scale: float = 1.00
-    vertical_scale: float = 1.00
-    max_command: int = 1000
-    command_timeout_ms: int = 250
-    current_offset_v: float = -0.026
-    current_scale_a_per_v: float = 25.0
-
-
-# ============================================================
-# Worker threads
-# ============================================================
 class VideoWorker(QThread):
     frame_ready = Signal(QImage)
     stats_ready = Signal(dict)
@@ -217,7 +202,6 @@ class UdpLinkWorker(QThread):
         self._broadcast_cmd_ip = "255.255.255.255"
         self._broadcast_fallback_logged = False
         self._latest_command = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "arm": False}
-        self._latest_tuning = asdict(TuningData())
 
     def stop(self):
         self._running = False
@@ -233,17 +217,6 @@ class UdpLinkWorker(QThread):
             self._latest_command["m2"] = 0.0
             self._latest_command["m3"] = 0.0
             self._latest_command["m4"] = 0.0
-
-    @Slot(dict)
-    def update_tuning(self, tuning: dict):
-        self._latest_tuning.update(tuning)
-        tune_payload = {"type": "tune"}
-        if "pulse_min_us" in self._latest_tuning:
-            tune_payload["pulse_min_us"] = int(self._latest_tuning["pulse_min_us"])
-        if "pulse_max_us" in self._latest_tuning:
-            tune_payload["pulse_max_us"] = int(self._latest_tuning["pulse_max_us"])
-        if len(tune_payload) > 1:
-            self.send_json(tune_payload)
 
     def _build_motor_command_payload(self) -> dict:
         armed = bool(self._latest_command.get("arm", self._latest_command.get("armed", False)))
@@ -539,6 +512,7 @@ class TelemetryPanel(QWidget):
                 ("timer_s", "Timer", self._format_timer),
                 ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
                 ("battery_v", "Battery", lambda v: f"{v:.2f} V"),
+                ("battery_cutoff_active", "Battery Cutoff", lambda v: "ACTIVE" if bool(v) else "OK"),
                 ("current_a", "Current", lambda v: f"{v:.2f} A"),
                 ("current_adc_v", "Current ADC", lambda v: f"{v:.3f} V"),
                 ("video_fps", "Video FPS", lambda v: f"{v:.1f}"),
@@ -624,109 +598,6 @@ class TelemetryPanel(QWidget):
         self.arm_label.setStyleSheet(self._arm_style(telemetry.armed))
 
 
-class TuningTab(QWidget):
-    tuning_changed = Signal(dict)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.controls = {}
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(12)
-
-        drive_box = SectionBox("Drive Tuning")
-        drive_form = QFormLayout(drive_box)
-        self.controls["deadzone"] = self._double(0.00, 0.50, 0.01, 0.08)
-        self.controls["trigger_scale"] = self._double(0.10, 2.00, 0.01, 1.00)
-        self.controls["yaw_scale"] = self._double(0.10, 2.00, 0.01, 1.00)
-        self.controls["strafe_scale"] = self._double(0.10, 2.00, 0.01, 1.00)
-        self.controls["vertical_scale"] = self._double(0.10, 2.00, 0.01, 1.00)
-        self.controls["max_command"] = self._spin(100, 1000, 10, 1000)
-        self.controls["command_timeout_ms"] = self._spin(50, 2000, 10, 250)
-
-        drive_form.addRow("Deadzone", self.controls["deadzone"])
-        drive_form.addRow("Trigger Scale", self.controls["trigger_scale"])
-        drive_form.addRow("Yaw Scale", self.controls["yaw_scale"])
-        drive_form.addRow("Strafe Scale", self.controls["strafe_scale"])
-        drive_form.addRow("Vertical Scale", self.controls["vertical_scale"])
-        drive_form.addRow("Max Command", self.controls["max_command"])
-        drive_form.addRow("Command Timeout (ms)", self.controls["command_timeout_ms"])
-
-        adc_box = SectionBox("Current Sensor Tuning")
-        adc_form = QFormLayout(adc_box)
-        self.controls["current_offset_v"] = self._double(-1.0, 3.3, 0.001, -0.026)
-        self.controls["current_scale_a_per_v"] = self._double(0.0, 500.0, 0.1, 25.0)
-        for key in ("current_offset_v", "current_scale_a_per_v"):
-            self.controls[key].setMinimumWidth(180)
-            self.controls[key].setStyleSheet("font-size: 16px;")
-        adc_box.setStyleSheet(
-            adc_box.styleSheet()
-            + " QFormLayout QLabel { font-size: 16px; } QAbstractSpinBox { font-size: 16px; }"
-        )
-
-        adc_form.addRow("Current Offset (V)", self.controls["current_offset_v"])
-        adc_form.addRow("Current Scale (A/V)", self.controls["current_scale_a_per_v"])
-
-        buttons_row = QHBoxLayout()
-        self.apply_btn = QPushButton("Apply Live")
-        self.reset_btn = QPushButton("Reset Defaults")
-        buttons_row.addWidget(self.apply_btn)
-        buttons_row.addWidget(self.reset_btn)
-        buttons_row.addStretch(1)
-
-        root.addWidget(drive_box)
-        root.addWidget(adc_box)
-        root.addLayout(buttons_row)
-        root.addStretch(1)
-
-        self.apply_btn.clicked.connect(self.emit_tuning)
-        self.reset_btn.clicked.connect(self.reset_defaults)
-
-    def _double(self, minimum, maximum, step, value):
-        widget = QDoubleSpinBox()
-        widget.setRange(minimum, maximum)
-        widget.setSingleStep(step)
-        widget.setValue(value)
-        widget.setDecimals(3)
-        widget.setMinimumWidth(120)
-        return widget
-
-    def _spin(self, minimum, maximum, step, value):
-        widget = QSpinBox()
-        widget.setRange(minimum, maximum)
-        widget.setSingleStep(step)
-        widget.setValue(value)
-        widget.setMinimumWidth(120)
-        return widget
-
-    def current_tuning(self) -> dict:
-        result = {}
-        for key, widget in self.controls.items():
-            if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
-                result[key] = widget.value()
-            elif isinstance(widget, QCheckBox):
-                result[key] = widget.isChecked()
-        return result
-
-    @Slot()
-    def emit_tuning(self):
-        self.tuning_changed.emit(self.current_tuning())
-
-    @Slot()
-    def reset_defaults(self):
-        defaults = TuningData()
-        for key, value in asdict(defaults).items():
-            if key not in self.controls:
-                continue
-            widget = self.controls[key]
-            if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
-                widget.setValue(value)
-            elif isinstance(widget, QCheckBox):
-                widget.setChecked(value)
-        self.emit_tuning()
-
-
 class LogTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -762,6 +633,12 @@ class MainWindow(QMainWindow):
         self.controller_armed = False
         self.controller_a_last_press_time = 0.0
         self.controller_missing_logged = False
+        self.controller_deadzone = 0.08
+        self.trigger_scale = 1.0
+        self.yaw_scale = 1.0
+        self.strafe_scale = 1.0
+        self.vertical_scale = 1.0
+        self._last_battery_cutoff_state = False
         self._last_presented_ts: Optional[float] = None
         self._presented_fps_ema = 0.0
 
@@ -864,11 +741,9 @@ class MainWindow(QMainWindow):
         telemetry_tab_layout.addWidget(self.telemetry_panel)
         telemetry_tab_layout.addLayout(arm_controls_layout)
 
-        self.tuning_tab = TuningTab()
         self.log_tab = LogTab()
 
         self.tabs.addTab(self.telemetry_tab, "Telemetry")
-        self.tabs.addTab(self.tuning_tab, "Tuning")
         self.tabs.addTab(self.log_tab, "Log")
 
         right.addWidget(self.tabs)
@@ -935,7 +810,6 @@ class MainWindow(QMainWindow):
         self.disconnect_btn.clicked.connect(self.stop_links)
         self.arm_btn.clicked.connect(lambda: self.send_arm_state(True))
         self.disarm_btn.clicked.connect(lambda: self.send_arm_state(False))
-        self.tuning_tab.tuning_changed.connect(self.on_tuning_changed)
         self.pi_hostname_edit.textChanged.connect(self.update_rtsp_url_from_host)
         self.show_password_check.toggled.connect(self.on_show_password_toggled)
 
@@ -972,8 +846,7 @@ class MainWindow(QMainWindow):
                     self.controller_missing_logged = True
                 return False
 
-            deadzone = float(self.tuning_tab.current_tuning().get("deadzone", 0.08))
-            self.controller_device = xbox360_controller.Controller(dead_zone=deadzone)
+            self.controller_device = xbox360_controller.Controller(dead_zone=self.controller_deadzone)
             self.controller_active = True
             self.controller_missing_logged = False
             self.log_tab.append_log("Xbox controller connected")
@@ -1018,12 +891,11 @@ class MainWindow(QMainWindow):
                     self.controller_a_last_press_time = now
                     self.log_tab.append_log("Controller ARMED" if self.controller_armed else "Controller DISARMED")
 
-        tuning = self.tuning_tab.current_tuning()
-        deadzone = float(tuning.get("deadzone", 0.08))
-        trigger_scale = float(tuning.get("trigger_scale", 1.0))
-        yaw_scale = float(tuning.get("yaw_scale", 1.0))
-        strafe_scale = float(tuning.get("strafe_scale", 1.0))
-        vertical_scale = float(tuning.get("vertical_scale", 1.0))
+        deadzone = self.controller_deadzone
+        trigger_scale = self.trigger_scale
+        yaw_scale = self.yaw_scale
+        strafe_scale = self.strafe_scale
+        vertical_scale = self.vertical_scale
 
         lt_x = self._clamp(self._apply_deadzone(float(lt_x), deadzone) * strafe_scale, -1.0, 1.0)
         lt_y = self._clamp(self._apply_deadzone(float(lt_y), deadzone) * vertical_scale, -1.0, 1.0)
@@ -1210,7 +1082,6 @@ class MainWindow(QMainWindow):
         self.udp_worker.telemetry_received.connect(self.on_telemetry_packet)
         self.udp_worker.log_message.connect(self.log_tab.append_log)
         self.udp_worker.link_state.connect(self.on_link_status)
-        self.tuning_tab.tuning_changed.connect(self.udp_worker.update_tuning)
         self.udp_worker.start()
 
         self.pi_temp_worker = PiTempWorker(pi_host=pi_host, pi_user=pi_user, pi_password=pi_password)
@@ -1331,54 +1202,19 @@ class MainWindow(QMainWindow):
     @Slot(dict)
     def on_telemetry_packet(self, payload: dict):
         data = payload.get("telemetry", payload)
+        prev_cutoff_state = bool(self.telemetry.battery_cutoff_active)
         for key in asdict(self.telemetry).keys():
             if key in data:
                 setattr(self.telemetry, key, data[key])
+        new_cutoff_state = bool(self.telemetry.battery_cutoff_active)
+        if new_cutoff_state != prev_cutoff_state:
+            if new_cutoff_state:
+                self.log_tab.append_log("Battery cutoff ACTIVE: motor movement blocked on Pi")
+            else:
+                self.log_tab.append_log("Battery cutoff CLEARED: motor movement restored")
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
         self._update_video_overlay()
-
-    @Slot(dict)
-    def on_tuning_changed(self, tuning: dict):
-        self.log_tab.append_log(f"Live tuning update: {tuning}")
-        if self.udp_worker is not None:
-            self.udp_worker.update_tuning(tuning)
-        self._push_sensor_tuning_to_pi(tuning)
-
-    def _push_sensor_tuning_to_pi(self, tuning: dict):
-        pi_user = self.pi_username_edit.text().strip() or "pi"
-        pi_host = self.pi_hostname_edit.text().strip()
-        pi_password = self._get_ssh_password()
-        if not pi_host or not pi_password or paramiko is None:
-            return
-
-        sensor_tuning = {
-            "current_offset_v": float(tuning.get("current_offset_v", -0.026)),
-            "current_scale_a_per_v": float(tuning.get("current_scale_a_per_v", 25.0)),
-        }
-
-        try:
-            client = paramiko.SSHClient()
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(
-                hostname=pi_host,
-                username=pi_user,
-                password=pi_password,
-                timeout=6,
-                auth_timeout=6,
-                banner_timeout=6,
-                look_for_keys=False,
-                allow_agent=False,
-            )
-            sftp = client.open_sftp()
-            remote_path = "/home/pi/anglerfish/sensor_tuning.json"
-            with sftp.file(remote_path, "w") as fh:
-                fh.write(json.dumps(sensor_tuning, indent=2, sort_keys=True))
-            sftp.close()
-            client.close()
-            self.log_tab.append_log(f"Sensor tuning pushed to {pi_host} ({remote_path})")
-        except Exception as exc:
-            self.log_tab.append_log(f"Sensor tuning push failed: {exc}")
 
     @Slot(float)
     def on_pi_temp_update(self, temp_c: float):
