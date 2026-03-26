@@ -60,6 +60,8 @@ def main():
 
     target_ip = BROADCAST_IP if USE_BROADCAST else PC_IP
     print(f"[sensors] Telemetry target: {target_ip}:{PC_PORT} (broadcast={USE_BROADCAST})")
+    if DEBUG:
+        print(f"[sensors] PC_IP={PC_IP}, BROADCAST_IP={BROADCAST_IP}")
 
     dt = 1.0 / max(1.0, RATE_HZ)
     speed = 0.0  # Integrated speed from acceleration
@@ -168,9 +170,11 @@ def main():
             if _changed_enough(compare_values, last_sent_values):
                 try:
                     sock.sendto(json.dumps(avg_msg).encode("utf-8"), (target_ip, PC_PORT))
+                    if DEBUG:
+                        print(f"[sensors] Sent telemetry to {target_ip}:{PC_PORT}: pi_temp_c={pi_temp_c}, battery_v={avg_msg['telemetry']['battery_v']}")
                     last_sent_values = compare_values
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f"[sensors] ERROR sending telemetry: {exc}")
 
             for values in samples.values():
                 values.clear()
