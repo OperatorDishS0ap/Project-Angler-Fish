@@ -94,8 +94,8 @@ class TuningData:
     vertical_scale: float = 1.00
     max_command: int = 1000
     command_timeout_ms: int = 250
-    current_offset_v: float = 2.5
-    current_scale_a_per_v: float = 10.0
+    current_offset_v: float = -0.026
+    current_scale_a_per_v: float = 25.0
 
 
 # ============================================================
@@ -655,8 +655,8 @@ class TuningTab(QWidget):
 
         adc_box = SectionBox("Current Sensor Tuning")
         adc_form = QFormLayout(adc_box)
-        self.controls["current_offset_v"] = self._double(0.0, 3.3, 0.001, 2.5)
-        self.controls["current_scale_a_per_v"] = self._double(0.0, 500.0, 0.1, 10.0)
+        self.controls["current_offset_v"] = self._double(-1.0, 3.3, 0.001, -0.026)
+        self.controls["current_scale_a_per_v"] = self._double(0.0, 500.0, 0.1, 25.0)
         for key in ("current_offset_v", "current_scale_a_per_v"):
             self.controls[key].setMinimumWidth(180)
             self.controls[key].setStyleSheet("font-size: 16px;")
@@ -1353,8 +1353,8 @@ class MainWindow(QMainWindow):
             return
 
         sensor_tuning = {
-            "current_offset_v": float(tuning.get("current_offset_v", 2.5)),
-            "current_scale_a_per_v": float(tuning.get("current_scale_a_per_v", 10.0)),
+            "current_offset_v": float(tuning.get("current_offset_v", -0.026)),
+            "current_scale_a_per_v": float(tuning.get("current_scale_a_per_v", 25.0)),
         }
 
         try:

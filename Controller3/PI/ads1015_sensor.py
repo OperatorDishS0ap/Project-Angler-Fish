@@ -28,8 +28,8 @@ THERM_TO_GND = os.environ.get("ANGLERFISH_ESC_THERM_TO_GND", "0") == "1"
 
 # Battery and current scaling
 BATTERY_DIVIDER_RATIO = float(os.environ.get("ANGLERFISH_BATTERY_DIVIDER_RATIO", "2.58"))
-CURRENT_OFFSET_V = float(os.environ.get("ANGLERFISH_CURRENT_OFFSET_V", "2.5"))
-CURRENT_SCALE_A_PER_V = float(os.environ.get("ANGLERFISH_CURRENT_SCALE_A_PER_V", "10.0"))
+CURRENT_OFFSET_V = float(os.environ.get("ANGLERFISH_CURRENT_OFFSET_V", "-0.026"))
+CURRENT_SCALE_A_PER_V = float(os.environ.get("ANGLERFISH_CURRENT_SCALE_A_PER_V", "25.0"))
 
 
 def apply_ads1015_tuning(tuning: dict):
