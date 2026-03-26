@@ -94,20 +94,8 @@ class TuningData:
     vertical_scale: float = 1.00
     max_command: int = 1000
     command_timeout_ms: int = 250
-    camera_brightness: float = 0.0
-    camera_contrast: float = 1.0
-    auto_reconnect_video: bool = True
-    auto_reconnect_udp: bool = True
-    telemetry_send_hz: float = 2.0
-    ads1015_hz: float = 8.0
     current_offset_v: float = 2.5
     current_scale_a_per_v: float = 10.0
-    battery_divider_ratio: float = 2.58
-    esc_therm_beta: float = 3950.0
-    esc_therm_r_fixed_ohm: float = 10000.0
-    esc_therm_r0_ohm: float = 10000.0
-    esc_therm_t0_c: float = 25.0
-    esc_therm_to_gnd: bool = False
 
 
 # ============================================================
@@ -665,46 +653,20 @@ class TuningTab(QWidget):
         drive_form.addRow("Max Command", self.controls["max_command"])
         drive_form.addRow("Command Timeout (ms)", self.controls["command_timeout_ms"])
 
-        camera_box = SectionBox("Camera Tuning")
-        camera_form = QFormLayout(camera_box)
-        self.controls["camera_brightness"] = self._double(-1.0, 1.0, 0.01, 0.0)
-        self.controls["camera_contrast"] = self._double(0.0, 4.0, 0.01, 1.0)
-        camera_form.addRow("Brightness", self.controls["camera_brightness"])
-        camera_form.addRow("Contrast", self.controls["camera_contrast"])
-
-        link_box = SectionBox("Link Options")
-        link_form = QFormLayout(link_box)
-        self.controls["auto_reconnect_video"] = QCheckBox()
-        self.controls["auto_reconnect_video"].setChecked(True)
-        self.controls["auto_reconnect_udp"] = QCheckBox()
-        self.controls["auto_reconnect_udp"].setChecked(True)
-        link_form.addRow("Auto Reconnect Video", self.controls["auto_reconnect_video"])
-        link_form.addRow("Auto Reconnect UDP", self.controls["auto_reconnect_udp"])
-
-        adc_box = SectionBox("ADC Sensor Tuning")
+        adc_box = SectionBox("Current Sensor Tuning")
         adc_form = QFormLayout(adc_box)
-        self.controls["telemetry_send_hz"] = self._double(0.1, 60.0, 0.1, 2.0)
-        self.controls["ads1015_hz"] = self._double(0.1, 200.0, 0.1, 8.0)
         self.controls["current_offset_v"] = self._double(0.0, 3.3, 0.001, 2.5)
         self.controls["current_scale_a_per_v"] = self._double(0.0, 500.0, 0.1, 10.0)
-        self.controls["battery_divider_ratio"] = self._double(0.1, 20.0, 0.01, 2.58)
-        self.controls["esc_therm_beta"] = self._double(1000.0, 10000.0, 1.0, 3950.0)
-        self.controls["esc_therm_r_fixed_ohm"] = self._double(100.0, 1000000.0, 100.0, 10000.0)
-        self.controls["esc_therm_r0_ohm"] = self._double(100.0, 1000000.0, 100.0, 10000.0)
-        self.controls["esc_therm_t0_c"] = self._double(-40.0, 150.0, 0.1, 25.0)
-        self.controls["esc_therm_to_gnd"] = QCheckBox()
-        self.controls["esc_therm_to_gnd"].setChecked(False)
+        for key in ("current_offset_v", "current_scale_a_per_v"):
+            self.controls[key].setMinimumWidth(180)
+            self.controls[key].setStyleSheet("font-size: 16px;")
+        adc_box.setStyleSheet(
+            adc_box.styleSheet()
+            + " QFormLayout QLabel { font-size: 16px; } QAbstractSpinBox { font-size: 16px; }"
+        )
 
-        adc_form.addRow("Telemetry Send Hz", self.controls["telemetry_send_hz"])
-        adc_form.addRow("ADS1015 Read Hz", self.controls["ads1015_hz"])
         adc_form.addRow("Current Offset (V)", self.controls["current_offset_v"])
         adc_form.addRow("Current Scale (A/V)", self.controls["current_scale_a_per_v"])
-        adc_form.addRow("Battery Divider Ratio", self.controls["battery_divider_ratio"])
-        adc_form.addRow("ESC Therm Beta", self.controls["esc_therm_beta"])
-        adc_form.addRow("ESC Therm Fixed R (ohm)", self.controls["esc_therm_r_fixed_ohm"])
-        adc_form.addRow("ESC Therm R0 (ohm)", self.controls["esc_therm_r0_ohm"])
-        adc_form.addRow("ESC Therm T0 (C)", self.controls["esc_therm_t0_c"])
-        adc_form.addRow("Thermistor To GND", self.controls["esc_therm_to_gnd"])
 
         buttons_row = QHBoxLayout()
         self.apply_btn = QPushButton("Apply Live")
@@ -714,8 +676,6 @@ class TuningTab(QWidget):
         buttons_row.addStretch(1)
 
         root.addWidget(drive_box)
-        root.addWidget(camera_box)
-        root.addWidget(link_box)
         root.addWidget(adc_box)
         root.addLayout(buttons_row)
         root.addStretch(1)
@@ -757,6 +717,8 @@ class TuningTab(QWidget):
     def reset_defaults(self):
         defaults = TuningData()
         for key, value in asdict(defaults).items():
+            if key not in self.controls:
+                continue
             widget = self.controls[key]
             if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
                 widget.setValue(value)
@@ -1391,16 +1353,8 @@ class MainWindow(QMainWindow):
             return
 
         sensor_tuning = {
-            "telemetry_send_hz": float(tuning.get("telemetry_send_hz", 2.0)),
-            "ads1015_hz": float(tuning.get("ads1015_hz", 8.0)),
             "current_offset_v": float(tuning.get("current_offset_v", 2.5)),
             "current_scale_a_per_v": float(tuning.get("current_scale_a_per_v", 10.0)),
-            "battery_divider_ratio": float(tuning.get("battery_divider_ratio", 2.58)),
-            "esc_therm_beta": float(tuning.get("esc_therm_beta", 3950.0)),
-            "esc_therm_r_fixed_ohm": float(tuning.get("esc_therm_r_fixed_ohm", 10000.0)),
-            "esc_therm_r0_ohm": float(tuning.get("esc_therm_r0_ohm", 10000.0)),
-            "esc_therm_t0_c": float(tuning.get("esc_therm_t0_c", 25.0)),
-            "esc_therm_to_gnd": bool(tuning.get("esc_therm_to_gnd", True)),
         }
 
         try:
