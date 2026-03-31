@@ -804,13 +804,17 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         tools_menu = self.menuBar().addMenu("Tools")
-        deploy_action = QAction("Upload Resources", self)
-        deploy_action.triggered.connect(self.deploy_pi_folder)
-        tools_menu.addAction(deploy_action)
-        
-        install_action = QAction("Install Start Services", self)
-        install_action.triggered.connect(self.install_start_services)
-        tools_menu.addAction(install_action)
+        update_action = QAction("Update Resources", self)
+        update_action.triggered.connect(self.deploy_pi_folder)
+        tools_menu.addAction(update_action)
+
+        upload_action = QAction("Upload rescources", self)
+        upload_action.triggered.connect(self.upload_pi_folder)
+        tools_menu.addAction(upload_action)
+
+        create_sub_action = QAction("Create Sub", self)
+        create_sub_action.triggered.connect(self.create_sub)
+        tools_menu.addAction(create_sub_action)
 
     def _connect_signals(self):
         self.connect_btn.clicked.connect(self.start_links)
@@ -855,6 +859,27 @@ class MainWindow(QMainWindow):
         else:
             settings.remove("connection/pi_password")
         settings.sync()
+
+    def _resolve_local_pi_dir(self) -> Path:
+        candidates: list[Path] = []
+
+        # PyInstaller one-file extracts bundled data under _MEIPASS.
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                candidates.append(Path(meipass) / "PI")
+            candidates.append(Path(sys.executable).resolve().parent / "PI")
+
+        candidates.append(Path(__file__).resolve().parent / "PI")
+        candidates.append(Path.cwd() / "PI")
+        candidates.append(Path.cwd() / "Controller3" / "PI")
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+
+        # Fall back to the first expected source layout path for clear error reporting.
+        return Path(__file__).resolve().parent / "PI"
 
     @staticmethod
     def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -1281,88 +1306,205 @@ class MainWindow(QMainWindow):
         self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")
 
     @Slot()
-    def install_start_services(self):
+    def create_sub(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_dir = "/home/pi/anglerfish"
         pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
         pi_password = self._get_ssh_password()
 
         self._save_connection_history()
 
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Create Sub Failed",
+                f"Local folder not found:\n{local_dir}",
+            )
+            return
+
         if not pi_host:
-            QMessageBox.warning(self, "Install Failed", "Pi IP is empty.")
+            QMessageBox.warning(self, "Create Sub Failed", "Pi IP is empty.")
             return
 
         if not pi_password:
             QMessageBox.warning(
                 self,
-                "Install Failed",
-                "Pi Password is required.",
+                "Create Sub Failed",
+                "Pi Password is required before creating the sub.",
             )
             return
 
         confirmation = QMessageBox.question(
             self,
-            "Install and Start Services",
+            "Create Sub",
             (
-                f"Install and start anglerfish services on:\n{pi_user}@{pi_host}\n\n"
+                f"Create sub on:\n{pi_user}@{pi_host}\n\n"
                 "This will:\n"
-                "1. Make install script executable\n"
-                "2. Run the install script\n"
-                "3. Start anglerfish.target service\n\n"
+                "1. Upload PI files\n"
+                "2. Run sudo install_anglerfish_dependencies.sh\n"
+                "3. Run sudo install_anglerfish_services.sh\n"
+                "4. Reboot the Pi\n\n"
                 "Continue?"
             ),
             QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.Yes,
         )
         if confirmation != QMessageBox.Yes:
             return
 
-        self.status_bar.showMessage("Installing services...")
-        self.log_tab.append_log("Installing and starting services...")
+        self.status_bar.showMessage("Creating sub on Pi...")
+        self.log_tab.append_log("Create Sub started")
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            # Run chmod to make the script executable
-            chmod_cmd = "chmod +x /home/pi/anglerfish/install_anglerfish_services.sh"
-            ok, output = self._run_ssh_command(pi_user, pi_host, chmod_cmd)
-            if not ok:
-                raise Exception(f"chmod failed: {output}")
-            self.log_tab.append_log("Made install script executable")
-
-            # Run the install script
-            install_cmd = "/home/pi/anglerfish/install_anglerfish_services.sh"
-            ok, output = self._run_ssh_command(pi_user, pi_host, install_cmd)
-            if not ok:
-                raise Exception(f"Install script failed: {output}")
-            self.log_tab.append_log("Install script executed")
-
-            # Start the service
-            start_cmd = "sudo systemctl start anglerfish.target"
-            ok, output = self._run_ssh_command(pi_user, pi_host, start_cmd)
-            if not ok:
-                raise Exception(f"Start service failed: {output}")
-            self.log_tab.append_log("Services started")
-
-            self.status_bar.showMessage("Services installed and started", 5000)
-            QMessageBox.information(
-                self,
-                "Services Installed",
-                "Services have been installed and started successfully.",
-            )
-        except Exception as e:
-            self.status_bar.showMessage("Installation failed", 8000)
-            self.log_tab.append_log(f"Installation failed: {e}")
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed during upload: {message}")
             QMessageBox.critical(
                 self,
-                "Installation Failed",
-                f"Could not install services.\n\nReason:\n{e}",
+                "Create Sub Failed",
+                f"Could not upload PI files.\n\nReason:\n{message}",
             )
-        finally:
-            QApplication.restoreOverrideCursor()
+            return
+        self.log_tab.append_log("Create Sub: upload complete")
+
+        deps_cmd = "sudo /home/pi/anglerfish/install_anglerfish_dependencies.sh"
+        ok, output = self._run_ssh_command(pi_user, pi_host, deps_cmd)
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed at dependencies install: {output}")
+            QMessageBox.critical(
+                self,
+                "Create Sub Failed",
+                "Upload succeeded, but dependency install failed.\n\n"
+                f"Reason:\n{output}",
+            )
+            return
+        self.log_tab.append_log("Create Sub: dependencies installed")
+
+        services_cmd = "sudo /home/pi/anglerfish/install_anglerfish_services.sh"
+        ok, output = self._run_ssh_command(pi_user, pi_host, services_cmd)
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed at services install: {output}")
+            QMessageBox.critical(
+                self,
+                "Create Sub Failed",
+                "Upload and dependency install succeeded, but service install failed.\n\n"
+                f"Reason:\n{output}",
+            )
+            return
+        self.log_tab.append_log("Create Sub: services installed")
+
+        reboot_ok, reboot_message = self._reboot_pi(pi_user, pi_host)
+        if not reboot_ok:
+            self.status_bar.showMessage("Create Sub completed with reboot failure", 9000)
+            self.log_tab.append_log(f"Create Sub reboot failed: {reboot_message}")
+            QMessageBox.warning(
+                self,
+                "Create Sub Complete (Reboot Failed)",
+                "Sub creation steps completed, but reboot failed.\n\n"
+                f"Reason:\n{reboot_message}",
+            )
+            return
+
+        self.status_bar.showMessage("Create Sub completed", 6000)
+        self.log_tab.append_log("Create Sub completed; reboot command sent")
+        QMessageBox.information(
+            self,
+            "Create Sub Complete",
+            "PI files uploaded, dependencies/services installed, and reboot command sent.",
+        )
+
+    @Slot()
+    def upload_pi_folder(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_dir = "/home/pi/anglerfish"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
+
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Upload Failed",
+                f"Local folder not found:\n{local_dir}",
+            )
+            return
+
+        if not pi_host:
+            QMessageBox.warning(self, "Upload Failed", "Pi IP is empty.")
+            return
+
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Upload Failed",
+                "Pi Password is required before uploading files.",
+            )
+            return
+
+        method_note = (
+            "Files will be copied directly over the local SSH link. "
+            "Paramiko SFTP is used when available; otherwise the app falls back to SSH/SCP."
+        )
+
+        confirmation = QMessageBox.question(
+            self,
+            "Upload to Pi",
+            (
+                f"Upload local PI folder to:\n{pi_user}@{pi_host}:{remote_dir}\n\n"
+                f"{method_note}\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Uploading resources to Pi...")
+        self.log_tab.append_log(
+            f"Upload started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
+        )
+
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
+
+        if ok:
+            self.status_bar.showMessage("Upload completed", 5000)
+            self.log_tab.append_log("Upload completed successfully")
+            QMessageBox.information(
+                self,
+                "Upload Complete",
+                "PI files were uploaded successfully.",
+            )
+            return
+
+        self.status_bar.showMessage("Upload failed", 8000)
+        self.log_tab.append_log(f"Upload failed: {message}")
+        tip = "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
+        QMessageBox.critical(
+            self,
+            "Upload Failed",
+            f"Could not upload files.\n\nReason:\n{message}\n\n{tip}",
+        )
 
     @Slot()
     def deploy_pi_folder(self):
-        local_dir = Path(__file__).resolve().parent / "PI"
+        local_dir = self._resolve_local_pi_dir()
         remote_dir = "/home/pi/anglerfish"
         pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
@@ -1408,44 +1550,23 @@ class MainWindow(QMainWindow):
         if confirmation != QMessageBox.Yes:
             return
 
-        self.status_bar.showMessage("Deploying to Pi...")
+        self.status_bar.showMessage("Updating resources on Pi...")
         self.log_tab.append_log(
-            f"Deploy started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
+            f"Update started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
         )
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            if paramiko is not None:
-                ok, message = self._deploy_via_sftp(
-                    host=pi_host,
-                    user=pi_user,
-                    password=pi_password,
-                    local_dir=local_dir,
-                    remote_dir=remote_dir,
-                )
-                if not ok:
-                    self.log_tab.append_log(f"SFTP deploy failed; trying SSH/SCP fallback: {message}")
-                    ok, message = self._deploy_via_scp_archive(
-                        host=pi_host,
-                        user=pi_user,
-                        local_dir=local_dir,
-                        remote_dir=remote_dir,
-                    )
-            else:
-                self.log_tab.append_log("Paramiko unavailable; falling back to SSH/SCP deploy")
-                ok, message = self._deploy_via_scp_archive(
-                    host=pi_host,
-                    user=pi_user,
-                    local_dir=local_dir,
-                    remote_dir=remote_dir,
-                )
-        finally:
-            QApplication.restoreOverrideCursor()
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
 
         if ok:
             restart_ok, restart_message = self._reboot_pi_after_update(pi_user, pi_host)
             self.status_bar.showMessage("Deploy completed", 5000)
-            self.log_tab.append_log("Deploy completed successfully")
+            self.log_tab.append_log("Update completed successfully")
             if restart_ok:
                 self.log_tab.append_log("Pi restart command sent")
                 QMessageBox.information(
@@ -1472,9 +1593,112 @@ class MainWindow(QMainWindow):
             f"Could not deploy files.\n\nReason:\n{message}\n\n{tip}",
         )
 
+    def _transfer_pi_resources(
+        self,
+        local_dir: Path,
+        remote_dir: str,
+        pi_user: str,
+        pi_host: str,
+        pi_password: str,
+    ) -> tuple[bool, str]:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if paramiko is not None:
+                ok, message = self._deploy_via_sftp(
+                    host=pi_host,
+                    user=pi_user,
+                    password=pi_password,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+                if not ok:
+                    self.log_tab.append_log(f"SFTP deploy failed; trying SSH/SCP fallback: {message}")
+                    ok, message = self._deploy_via_scp_archive(
+                        host=pi_host,
+                        user=pi_user,
+                        local_dir=local_dir,
+                        remote_dir=remote_dir,
+                    )
+                if not ok:
+                    return ok, message
+                return self._prune_remote_resources(
+                    pi_user=pi_user,
+                    pi_host=pi_host,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+
+            self.log_tab.append_log("Paramiko unavailable; falling back to SSH/SCP deploy")
+            ok, message = self._deploy_via_scp_archive(
+                host=pi_host,
+                user=pi_user,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+            )
+            if not ok:
+                return ok, message
+            return self._prune_remote_resources(
+                pi_user=pi_user,
+                pi_host=pi_host,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _prune_remote_resources(
+        self,
+        pi_user: str,
+        pi_host: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        expected_files = sorted(
+            str(path.relative_to(local_dir)).replace("\\", "/")
+            for path in local_dir.rglob("*")
+            if path.is_file()
+        )
+        expected_payload = json.dumps(expected_files)
+
+        cleanup_snippet = "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                f"root = pathlib.Path({remote_dir!r})",
+                f"expected = set(json.loads({expected_payload!r}))",
+                "root.mkdir(parents=True, exist_ok=True)",
+                "deleted_files = 0",
+                "deleted_dirs = 0",
+                "for path in [p for p in root.rglob('*') if p.is_file()] :",
+                "    rel = path.relative_to(root).as_posix()",
+                "    if rel not in expected:",
+                "        path.unlink(missing_ok=True)",
+                "        deleted_files += 1",
+                "dirs = sorted([p for p in root.rglob('*') if p.is_dir()], key=lambda p: len(p.parts), reverse=True)",
+                "for path in dirs:",
+                "    try:",
+                "        path.rmdir()",
+                "        deleted_dirs += 1",
+                "    except OSError:",
+                "        pass",
+                "print(f'Pruned {deleted_files} files and {deleted_dirs} directories')",
+            ]
+        )
+
+        ok, output = self._run_ssh_command(
+            pi_user,
+            pi_host,
+            f"python3 -c {shlex.quote(cleanup_snippet)}",
+        )
+        if not ok:
+            return False, f"File upload succeeded, but cleanup failed: {output}"
+
+        self.log_tab.append_log(output.strip() or "Remote cleanup completed")
+        return True, "OK"
+
     @Slot()
     def initialize_git_deploy(self):
-        local_dir = Path(__file__).resolve().parent / "PI"
+        local_dir = self._resolve_local_pi_dir()
         remote_working_dir = "/home/pi/anglerfish"
         remote_bare_repo = "/home/pi/anglerfish.git"
         pi_user = self.pi_username_edit.text().strip() or "pi"
@@ -1552,7 +1776,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def git_deploy_preflight_check(self):
-        local_dir = Path(__file__).resolve().parent / "PI"
+        local_dir = self._resolve_local_pi_dir()
         remote_working_dir = "/home/pi/anglerfish"
         remote_bare_repo = "/home/pi/anglerfish.git"
         pi_user = self.pi_username_edit.text().strip() or "pi"
@@ -2016,6 +2240,13 @@ class MainWindow(QMainWindow):
         if not ok:
             return False, output
         return True, output or "Service restart command accepted"
+
+    def _reboot_pi(self, pi_user: str, pi_host: str) -> tuple[bool, str]:
+        reboot_cmd = "nohup sh -c 'sleep 1; sudo reboot' >/dev/null 2>&1 &"
+        ok, output = self._run_ssh_command(pi_user, pi_host, reboot_cmd)
+        if not ok:
+            return False, output
+        return True, output or "Reboot command accepted"
 
     def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
         return self._restart_anglerfish_service(user, host)
