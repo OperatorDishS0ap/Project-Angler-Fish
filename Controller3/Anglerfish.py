@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-import numpy as np
 try:
     import paramiko
 except ImportError:
@@ -29,7 +28,7 @@ try:
 except ImportError:
     xbox360_controller = None
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings
 from PySide6.QtGui import QAction, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -514,7 +513,6 @@ class TelemetryPanel(QWidget):
                 ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
                 ("battery_cutoff_active", "Battery Cutoff", lambda v: "ACTIVE" if bool(v) else "OK"),
                 ("esc_overtemp_active", "ESC Overtemp", lambda v: "ACTIVE" if bool(v) else "OK"),
-                ("esc_max_temp_c", "ESC Max Temp", lambda v: f"{v:.1f} C"),
                 ("current_a", "Current", lambda v: f"{v:.2f} A"),
                 ("current_adc_v", "Current ADC", lambda v: f"{v:.3f} V"),
             ],
@@ -534,15 +532,7 @@ class TelemetryPanel(QWidget):
                 ("accel_mps2", "Accel", lambda v: f"{v:.2f} m/s^2"),
             ],
         )
-        thrusters = self._make_section(
-            "Thruster Command",
-            [
-                ("m1", "m1", lambda v: f"{int(v)}"),
-                ("m2", "m2", lambda v: f"{int(v)}"),
-                ("m3", "m3", lambda v: f"{int(v)}"),
-                ("m4", "m4", lambda v: f"{int(v)}"),
-            ],
-        )
+        thrusters = self._make_thruster_section()
 
         self.arm_label = QLabel("DISARMED")
         self.arm_label.setAlignment(Qt.AlignCenter)
@@ -569,6 +559,24 @@ class TelemetryPanel(QWidget):
             value_label.setProperty("formatter", formatter)
             self.labels[key] = value_label
             layout.addRow(f"{label}:", value_label)
+        return box
+
+    def _make_thruster_section(self):
+        box = SectionBox("Thruster Command")
+        layout = QGridLayout(box)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(10)
+
+        for key, row, col in (("m1", 0, 0), ("m2", 0, 1), ("m3", 1, 0), ("m4", 1, 1)):
+            value_label = QLabel(f"{key.upper()} 0")
+            value_label.setAlignment(Qt.AlignCenter)
+            value_label.setMinimumHeight(32)
+            value_label.setStyleSheet("font-size: 14px; font-weight: 700; border: 1px solid #5a5a5a; border-radius: 6px;")
+            value_label.setProperty("formatter", lambda v, motor=key.upper(): f"{motor} {int(v)}")
+            self.labels[key] = value_label
+            layout.addWidget(value_label, row, col)
+
         return box
 
     @staticmethod
@@ -674,14 +682,9 @@ class MainWindow(QMainWindow):
         self.pi_password_edit.setEchoMode(QLineEdit.Password)
         self.pi_password_edit.setPlaceholderText("SSH password (required for updates)")
         self.show_password_check = QCheckBox("Show Password")
+        self.remember_password_check = QCheckBox("Remember Password")
         self.pi_hostname_edit = QLineEdit("192.168.50.107")
         self.rtsp_path_edit = QLineEdit("rtsp://192.168.50.107:8554/cam")
-        self.cmd_port_spin = QSpinBox()
-        self.cmd_port_spin.setRange(1, 65535)
-        self.cmd_port_spin.setValue(9000)
-        self.telemetry_port_spin = QSpinBox()
-        self.telemetry_port_spin.setRange(1, 65535)
-        self.telemetry_port_spin.setValue(9001)
 
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
@@ -696,12 +699,9 @@ class MainWindow(QMainWindow):
         connection_layout.addWidget(QLabel("Pi Password"), 1, 0)
         connection_layout.addWidget(self.pi_password_edit, 1, 1, 1, 2)
         connection_layout.addWidget(self.show_password_check, 1, 3)
-        connection_layout.addWidget(QLabel("RTSP URL"), 2, 0)
-        connection_layout.addWidget(self.rtsp_path_edit, 2, 1, 1, 3)
-        connection_layout.addWidget(QLabel("Cmd Port"), 3, 0)
-        connection_layout.addWidget(self.cmd_port_spin, 3, 1)
-        connection_layout.addWidget(QLabel("Telemetry Port"), 3, 2)
-        connection_layout.addWidget(self.telemetry_port_spin, 3, 3)
+        connection_layout.addWidget(self.remember_password_check, 2, 0, 1, 2)
+        connection_layout.addWidget(QLabel("RTSP URL"), 3, 0)
+        connection_layout.addWidget(self.rtsp_path_edit, 3, 1, 1, 3)
         connection_layout.addWidget(self.connect_btn, 4, 0)
 
         self.disconnect_only_widget = QWidget()
@@ -775,12 +775,9 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._connect_signals()
+        self._load_connection_history()
         self._update_arm_buttons()
         self._update_video_overlay()
-
-        # demo update timer for local UI test only
-        self.demo_timer = QTimer(self)
-        self.demo_timer.timeout.connect(self._demo_telemetry_tick)
 
         self.connection_timer = QTimer(self)
         self.connection_timer.setInterval(200)
@@ -807,18 +804,13 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         tools_menu = self.menuBar().addMenu("Tools")
-        demo_action = QAction("Start Demo Telemetry", self)
-        demo_action.triggered.connect(self.toggle_demo)
-        tools_menu.addAction(demo_action)
-        init_git_action = QAction("Initialize Git Deploy", self)
-        init_git_action.triggered.connect(self.initialize_git_deploy)
-        tools_menu.addAction(init_git_action)
-        preflight_action = QAction("Git Deploy Preflight Check", self)
-        preflight_action.triggered.connect(self.git_deploy_preflight_check)
-        tools_menu.addAction(preflight_action)
-        deploy_action = QAction("Offline Deploy to Pi", self)
+        deploy_action = QAction("Upload Resources", self)
         deploy_action.triggered.connect(self.deploy_pi_folder)
         tools_menu.addAction(deploy_action)
+        
+        install_action = QAction("Install Start Services", self)
+        install_action.triggered.connect(self.install_start_services)
+        tools_menu.addAction(install_action)
 
     def _connect_signals(self):
         self.connect_btn.clicked.connect(self.start_links)
@@ -827,10 +819,42 @@ class MainWindow(QMainWindow):
         self.disarm_btn.clicked.connect(lambda: self.send_arm_state(False))
         self.pi_hostname_edit.textChanged.connect(self.update_rtsp_url_from_host)
         self.show_password_check.toggled.connect(self.on_show_password_toggled)
+        self.remember_password_check.toggled.connect(self.on_remember_password_toggled)
 
     @Slot(bool)
     def on_show_password_toggled(self, checked: bool):
         self.pi_password_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+
+    @Slot(bool)
+    def on_remember_password_toggled(self, checked: bool):
+        if not checked:
+            settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+            settings.remove("connection/pi_password")
+            settings.sync()
+        self._save_connection_history()
+
+    def _load_connection_history(self):
+        settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+        saved_host = str(settings.value("connection/pi_host", "") or "").strip()
+        remember_password = str(settings.value("connection/remember_password", "0") or "0") == "1"
+        saved_password = str(settings.value("connection/pi_password", "") or "")
+
+        if saved_host:
+            self.pi_hostname_edit.setText(saved_host)
+        self.remember_password_check.setChecked(remember_password)
+        if remember_password and saved_password:
+            self.pi_password_edit.setText(saved_password)
+
+    def _save_connection_history(self):
+        settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+        settings.setValue("connection/pi_host", self.pi_hostname_edit.text().strip())
+        remember_password = self.remember_password_check.isChecked()
+        settings.setValue("connection/remember_password", "1" if remember_password else "0")
+        if remember_password:
+            settings.setValue("connection/pi_password", self.pi_password_edit.text())
+        else:
+            settings.remove("connection/pi_password")
+        settings.sync()
 
     @staticmethod
     def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -1083,8 +1107,10 @@ class MainWindow(QMainWindow):
         pi_password = self._get_ssh_password()
         rtsp_url = self.rtsp_path_edit.text().strip()
         rtsp_host = (urlparse(rtsp_url).hostname or "").strip()
-        cmd_port = self.cmd_port_spin.value()
-        telemetry_port = self.telemetry_port_spin.value()
+        cmd_port = 9000
+        telemetry_port = 9001
+
+        self._save_connection_history()
 
         self.video_worker = VideoWorker(rtsp_url)
         self.video_worker.frame_ready.connect(self.on_video_frame)
@@ -1254,13 +1280,85 @@ class MainWindow(QMainWindow):
             self.udp_worker.update_command({"arm": armed})
         self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")
 
-    def toggle_demo(self):
-        if self.demo_timer.isActive():
-            self.demo_timer.stop()
-            self.log_tab.append_log("Demo telemetry stopped")
-        else:
-            self.demo_timer.start(500)
-            self.log_tab.append_log("Demo telemetry started")
+    @Slot()
+    def install_start_services(self):
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
+
+        if not pi_host:
+            QMessageBox.warning(self, "Install Failed", "Pi IP is empty.")
+            return
+
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Install Failed",
+                "Pi Password is required.",
+            )
+            return
+
+        confirmation = QMessageBox.question(
+            self,
+            "Install and Start Services",
+            (
+                f"Install and start anglerfish services on:\n{pi_user}@{pi_host}\n\n"
+                "This will:\n"
+                "1. Make install script executable\n"
+                "2. Run the install script\n"
+                "3. Start anglerfish.target service\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Installing services...")
+        self.log_tab.append_log("Installing and starting services...")
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            # Run chmod to make the script executable
+            chmod_cmd = "chmod +x /home/pi/anglerfish/install_anglerfish_services.sh"
+            ok, output = self._run_ssh_command(pi_user, pi_host, chmod_cmd)
+            if not ok:
+                raise Exception(f"chmod failed: {output}")
+            self.log_tab.append_log("Made install script executable")
+
+            # Run the install script
+            install_cmd = "/home/pi/anglerfish/install_anglerfish_services.sh"
+            ok, output = self._run_ssh_command(pi_user, pi_host, install_cmd)
+            if not ok:
+                raise Exception(f"Install script failed: {output}")
+            self.log_tab.append_log("Install script executed")
+
+            # Start the service
+            start_cmd = "sudo systemctl start anglerfish.target"
+            ok, output = self._run_ssh_command(pi_user, pi_host, start_cmd)
+            if not ok:
+                raise Exception(f"Start service failed: {output}")
+            self.log_tab.append_log("Services started")
+
+            self.status_bar.showMessage("Services installed and started", 5000)
+            QMessageBox.information(
+                self,
+                "Services Installed",
+                "Services have been installed and started successfully.",
+            )
+        except Exception as e:
+            self.status_bar.showMessage("Installation failed", 8000)
+            self.log_tab.append_log(f"Installation failed: {e}")
+            QMessageBox.critical(
+                self,
+                "Installation Failed",
+                f"Could not install services.\n\nReason:\n{e}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
 
     @Slot()
     def deploy_pi_folder(self):
@@ -1269,6 +1367,8 @@ class MainWindow(QMainWindow):
         pi_user = self.pi_username_edit.text().strip() or "pi"
         pi_host = self.pi_hostname_edit.text().strip()
         pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
 
         if not local_dir.exists() or not local_dir.is_dir():
             QMessageBox.warning(
@@ -1343,23 +1443,23 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         if ok:
-            reboot_ok, reboot_message = self._reboot_pi_after_update(pi_user, pi_host)
+            restart_ok, restart_message = self._reboot_pi_after_update(pi_user, pi_host)
             self.status_bar.showMessage("Deploy completed", 5000)
             self.log_tab.append_log("Deploy completed successfully")
-            if reboot_ok:
-                self.log_tab.append_log("Pi reboot command sent")
+            if restart_ok:
+                self.log_tab.append_log("Pi restart command sent")
                 QMessageBox.information(
                     self,
                     "Deploy Complete",
-                    "PI files were updated successfully. Reboot command sent to Pi.",
+                    "PI files were updated successfully. Service restart command sent to Pi.",
                 )
             else:
-                self.log_tab.append_log(f"Deploy succeeded, but reboot failed: {reboot_message}")
+                self.log_tab.append_log(f"Deploy succeeded, but restart failed: {restart_message}")
                 QMessageBox.warning(
                     self,
-                    "Deploy Complete (Reboot Failed)",
-                    "PI files were updated successfully, but auto-reboot failed.\n\n"
-                    f"Reason:\n{reboot_message}",
+                    "Deploy Complete (Restart Failed)",
+                    "PI files were updated successfully, but auto-restart failed.\n\n"
+                    f"Reason:\n{restart_message}",
                 )
             return
 
@@ -1910,12 +2010,15 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
-    def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
-        reboot_cmd = "nohup sh -c 'sleep 1; sudo reboot' >/dev/null 2>&1 &"
-        ok, output = self._run_ssh_command(user, host, reboot_cmd)
+    def _restart_anglerfish_service(self, pi_user: str, pi_host: str) -> tuple[bool, str]:
+        restart_cmd = "sudo systemctl restart anglerfish.target"
+        ok, output = self._run_ssh_command(pi_user, pi_host, restart_cmd)
         if not ok:
             return False, output
-        return True, output or "Reboot command accepted"
+        return True, output or "Service restart command accepted"
+
+    def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
+        return self._restart_anglerfish_service(user, host)
 
     def _initialize_git_deploy(
         self,
@@ -2148,26 +2251,8 @@ class MainWindow(QMainWindow):
 
         return all_ok, lines
 
-    def _demo_telemetry_tick(self):
-        self.telemetry.timer_s += 1
-        self.telemetry.battery_v = max(9.5, 16.2 - (self.telemetry.timer_s / 800.0))
-        self.telemetry.pi_temp_c = 44.0 + ((self.telemetry.timer_s % 7) * 0.3)
-        self.telemetry.depth_m = abs(np.sin(self.telemetry.timer_s / 20.0)) * 4.5
-        self.telemetry.pressure_bar = 1.0 + (self.telemetry.depth_m / 10.0)
-        self.telemetry.water_temp_c = 22.5
-        self.telemetry.enclosure_temp_c = 27.0 + ((self.telemetry.timer_s % 5) * 0.2)
-        self.telemetry.speed_mps = abs(np.sin(self.telemetry.timer_s / 10.0)) * 1.8
-        self.telemetry.accel_mps2 = abs(np.cos(self.telemetry.timer_s / 8.0)) * 0.7
-        self.telemetry.m1 = int(200 * np.sin(self.telemetry.timer_s / 5.0))
-        self.telemetry.m2 = int(200 * np.cos(self.telemetry.timer_s / 5.0))
-        self.telemetry.m3 = int(180 * np.sin(self.telemetry.timer_s / 7.0))
-        self.telemetry.m4 = int(180 * np.cos(self.telemetry.timer_s / 7.0))
-        self.telemetry.armed = True
-        self.telemetry_panel.update_telemetry(self.telemetry)
-        self._update_arm_buttons()
-        self._update_video_overlay()
-
     def closeEvent(self, event):
+        self._save_connection_history()
         self._stop_controller_polling()
         self.stop_links()
         super().closeEvent(event)
