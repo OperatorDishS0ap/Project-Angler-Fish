@@ -860,26 +860,55 @@ class MainWindow(QMainWindow):
             settings.remove("connection/pi_password")
         settings.sync()
 
-    def _resolve_local_pi_dir(self) -> Path:
+    def _build_pi_dir_candidates(self) -> list[Path]:
         candidates: list[Path] = []
 
-        # PyInstaller one-file extracts bundled data under _MEIPASS.
+        def _add_base_paths(base: Path):
+            base = base.resolve()
+            candidates.append(base / "PI")
+            candidates.append(base / "Controller3" / "PI")
+            for parent in list(base.parents)[:3]:
+                candidates.append(parent / "PI")
+                candidates.append(parent / "Controller3" / "PI")
+
         if getattr(sys, "frozen", False):
             meipass = getattr(sys, "_MEIPASS", None)
             if meipass:
-                candidates.append(Path(meipass) / "PI")
-            candidates.append(Path(sys.executable).resolve().parent / "PI")
+                _add_base_paths(Path(meipass))
+            _add_base_paths(Path(sys.executable).resolve().parent)
 
-        candidates.append(Path(__file__).resolve().parent / "PI")
-        candidates.append(Path.cwd() / "PI")
-        candidates.append(Path.cwd() / "Controller3" / "PI")
+        _add_base_paths(Path(__file__).resolve().parent)
+        _add_base_paths(Path.cwd())
+
+        seen: set[Path] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            unique.append(candidate)
+        return unique
+
+    def _resolve_local_pi_dir(self) -> Path:
+        candidates = self._build_pi_dir_candidates()
+        self._last_pi_dir_candidates = [str(path) for path in candidates]
 
         for candidate in candidates:
             if candidate.exists() and candidate.is_dir():
                 return candidate
 
-        # Fall back to the first expected source layout path for clear error reporting.
-        return Path(__file__).resolve().parent / "PI"
+        return candidates[0] if candidates else (Path(__file__).resolve().parent / "PI")
+
+    def _local_pi_dir_not_found_message(self, local_dir: Path) -> str:
+        looked_in = getattr(self, "_last_pi_dir_candidates", [])
+        looked_block = "\n".join(looked_in[:12]) if looked_in else str(local_dir)
+        return (
+            f"Local folder not found:\n{local_dir}\n\n"
+            "Looked in:\n"
+            f"{looked_block}\n\n"
+            "For PyInstaller builds, include the PI folder with add-data, for example:\n"
+            "--add-data \"Controller3/PI;PI\""
+        )
 
     @staticmethod
     def _clamp(value: float, minimum: float, maximum: float) -> float:
@@ -1319,7 +1348,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Create Sub Failed",
-                f"Local folder not found:\n{local_dir}",
+                self._local_pi_dir_not_found_message(local_dir),
             )
             return
 
@@ -1436,7 +1465,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Upload Failed",
-                f"Local folder not found:\n{local_dir}",
+                self._local_pi_dir_not_found_message(local_dir),
             )
             return
 
@@ -1516,7 +1545,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Deploy Failed",
-                f"Local folder not found:\n{local_dir}",
+                self._local_pi_dir_not_found_message(local_dir),
             )
             return
 
@@ -1708,7 +1737,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Init Failed",
-                f"Local folder not found:\n{local_dir}",
+                self._local_pi_dir_not_found_message(local_dir),
             )
             return
 
