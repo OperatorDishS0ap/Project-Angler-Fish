@@ -1,4 +1,4 @@
-For the Pi Zero 2W Submarine Controller
+# Raspberry Pi 2W Submarine Controller Setup:
 
 Install Raspberry Pi OS Lite (64bit) Trixie
 
@@ -16,9 +16,18 @@ Enter the config section:
 ```
 sudo raspi-config
 ```
-Go to Interface Options, I2C, Enable.
-Update
+Go to Interface Options, I2C, Enable. Proceed to update the PI and finish when done.  
 
+Determine the PI ip address:
+```
+ifconfig
+```
+
+Open the anglerfish control station. Input the ip address, the username, and the password. Under the tools section select create sub and wait for the installation to finish. The system will automatically reboot the PI. Once the PI reboots and starts the programs, the control station will connect to the sub.
+
+
+# Dependencies:
+### Only For troubleshooting
 Install git:
 ```
 sudo apt install -y git

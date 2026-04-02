@@ -29,15 +29,15 @@ ESC_FREQ_HZ = 400
 PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
 PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
 
-PULSE_MIN = 1375
-PULSE_MAX = 1625
+PULSE_MIN = 1000
+PULSE_MAX = 2000
 
 PULSE_NEUTRAL = 1460
 
 # "Creep zone" to avoid sending (neutral, 1600]
 AVOID_LO = 1406
 AVOID_HI = 1514
-FORWARD_START = AVOID_HI + 1  # 1601
+FORWARD_START = AVOID_HI + 1  # 1515
 
 ARM_TIME_S = 3.0
 LOOP_SLEEP_S = 0.005
