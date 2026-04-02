@@ -1047,10 +1047,11 @@ class MainWindow(QMainWindow):
         if self.udp_worker is not None:
             self.udp_worker.update_command(payload)
 
-        self.telemetry.m1 = int(payload["m1"])
-        self.telemetry.m2 = int(payload["m2"])
-        self.telemetry.m3 = int(payload["m3"])
-        self.telemetry.m4 = int(payload["m4"])
+        # GUI display mapping: physical M1/M2 correspond to command m3/m4, and M3/M4 to m1/m2.
+        self.telemetry.m1 = int(payload["m3"])
+        self.telemetry.m2 = int(payload["m4"])
+        self.telemetry.m3 = int(payload["m1"])
+        self.telemetry.m4 = int(payload["m2"])
         self.telemetry.armed = self.controller_armed
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
