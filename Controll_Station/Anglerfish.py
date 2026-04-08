@@ -967,8 +967,8 @@ class MainWindow(QMainWindow):
         try:
             pygame.event.pump()
             buttons = self.controller_device.get_buttons()
-            lt_x, lt_y = self.controller_device.get_left_stick()
-            rt_x, _rt_y = self.controller_device.get_right_stick()
+            rt_x, _rt_y = self.controller_device.get_left_stick()
+            lt_x, lt_y = self.controller_device.get_right_stick()
             triggers = self.controller_device.get_triggers()
             pad_up, pad_right, pad_down, pad_left = self.controller_device.get_pad()
         except Exception as exc:

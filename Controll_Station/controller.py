@@ -51,6 +51,7 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: 
 
     yaw_flag = 0
     pitch_flag = 0
+    turn_value = 0
 
     # For forward/backward, keep m1 and m2 the same
     if abs(triggers) > 0.05:
@@ -74,6 +75,14 @@ def compute_motors(lt_x: float, lt_y: float, rt_x: float, triggers: float, pad: 
             m1 = -m2
         else:
             m1, m2 = 0.0, 0.0
+    else:
+        if abs(rt_x) > 0.05:
+            turn_value = clamp(rt_x, -1.0, 1.0)
+            if turn_value > 0:
+                m4 = m4 - turn_value
+            else:
+                m3 = m3 - turn_value
+    
 
     #Control Pitch
     if abs(lt_y) > 0.05:
@@ -216,8 +225,8 @@ class XboxControllerReader:
         pygame.event.pump()
 
         pressed = self.controller.get_buttons()
-        lt_x, lt_y = self.controller.get_left_stick()
-        rt_x, _rt_y = self.controller.get_right_stick()
+        rt_x, _rt_y = self.controller.get_left_stick()
+        lt_x, lt_y = self.controller.get_right_stick()
         triggers = self.controller.get_triggers()
         a_btn = pressed[xbox360_controller.A]
         pad = self.controller.get_pad()

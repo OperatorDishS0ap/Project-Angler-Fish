@@ -30,7 +30,7 @@ PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
 PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
 
 PULSE_MIN = 1400
-PULSE_MAX = 1600
+PULSE_MAX = 1650
 
 PULSE_NEUTRAL = 1460
 
@@ -45,6 +45,7 @@ COMMAND_TIMEOUT_S = 1.0
 LOCK_PATH = "/tmp/anglerfish_motors.lock"
 POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
 POWER_STATE_CHECK_S = float(os.environ.get("ANGLERFISH_POWER_STATE_CHECK_S", "0.1"))
+BATTERY_CUTOFF_THROTTLE_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_THROTTLE_V", "5.8"))
 
 # Small command deadband: treat tiny commands as neutral
 PCT_DEADBAND = 2.0  # percent
@@ -310,7 +311,9 @@ def main():
                 arm_requested = False
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
-            if battery_cutoff_active or esc_overtemp_active:
+            throttle_active = any(abs(v) > PCT_DEADBAND for v in last.values())
+            hard_cutoff = (last_battery_v is not None and last_battery_v <= BATTERY_CUTOFF_THROTTLE_V)
+            if (battery_cutoff_active and not throttle_active) or hard_cutoff or esc_overtemp_active:
                 arm_requested = False
                 last = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0}
 
