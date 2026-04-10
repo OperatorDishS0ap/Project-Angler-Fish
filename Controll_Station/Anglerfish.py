@@ -78,6 +78,10 @@ class TelemetryData:
 
     speed_mps: float = 0.0
     accel_mps2: float = 0.0
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    pitch_rate_dps: float = 0.0
+    roll_rate_dps: float = 0.0
 
     m1: int = 0
     m2: int = 0
@@ -85,6 +89,7 @@ class TelemetryData:
     m4: int = 0
 
     armed: bool = False
+    stabilization_enabled: bool = False
 
 class VideoWorker(QThread):
     frame_ready = Signal(QImage)
@@ -201,7 +206,14 @@ class UdpLinkWorker(QThread):
         self._resolve_error_logged = False
         self._broadcast_cmd_ip = "255.255.255.255"
         self._broadcast_fallback_logged = False
-        self._latest_command = {"m1": 0.0, "m2": 0.0, "m3": 0.0, "m4": 0.0, "arm": False}
+        self._latest_command = {
+            "m1": 0.0,
+            "m2": 0.0,
+            "m3": 0.0,
+            "m4": 0.0,
+            "arm": False,
+            "stabilize_horizontal": False,
+        }
 
     def stop(self):
         self._running = False
@@ -220,18 +232,14 @@ class UdpLinkWorker(QThread):
 
     def _build_motor_command_payload(self) -> dict:
         armed = bool(self._latest_command.get("arm", self._latest_command.get("armed", False)))
-        if not armed:
-            return {
-                "type": "command",
-                "arm": False,
-            }
         return {
             "type": "command",
-            "m1": float(self._latest_command.get("m1", 0.0)),
-            "m2": float(self._latest_command.get("m2", 0.0)),
-            "m3": float(self._latest_command.get("m3", 0.0)),
-            "m4": float(self._latest_command.get("m4", 0.0)),
-            "arm": True,
+            "m1": float(self._latest_command.get("m1", 0.0)) if armed else 0.0,
+            "m2": float(self._latest_command.get("m2", 0.0)) if armed else 0.0,
+            "m3": float(self._latest_command.get("m3", 0.0)) if armed else 0.0,
+            "m4": float(self._latest_command.get("m4", 0.0)) if armed else 0.0,
+            "arm": armed,
+            "stabilize_horizontal": bool(self._latest_command.get("stabilize_horizontal", False)),
         }
 
     @staticmethod
@@ -262,6 +270,10 @@ class UdpLinkWorker(QThread):
                 "enclosure_temp_c": float(payload.get("temp_enclosure", 0.0)),
                 "speed_mps": float(payload.get("speed", 0.0)),
                 "accel_mps2": float(payload.get("acceleration", 0.0)),
+                "pitch_deg": float(payload.get("pitch_deg", 0.0)),
+                "roll_deg": float(payload.get("roll_deg", 0.0)),
+                "pitch_rate_dps": float(payload.get("pitch_rate_dps", 0.0)),
+                "roll_rate_dps": float(payload.get("roll_rate_dps", 0.0)),
             }
             return {"telemetry": telemetry}
 
@@ -511,6 +523,7 @@ class TelemetryPanel(QWidget):
             [
                 ("timer_s", "Timer", self._format_timer),
                 ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
+                ("stabilization_enabled", "Stabilization", lambda v: "ON" if bool(v) else "OFF"),
                 ("battery_cutoff_active", "Battery Cutoff", lambda v: "ACTIVE" if bool(v) else "OK"),
                 ("esc_overtemp_active", "ESC Overtemp", lambda v: "ACTIVE" if bool(v) else "OK"),
                 ("current_a", "Current", lambda v: f"{v:.2f} A"),
@@ -530,6 +543,10 @@ class TelemetryPanel(QWidget):
             "Motion",
             [
                 ("accel_mps2", "Accel", lambda v: f"{v:.2f} m/s^2"),
+                ("pitch_deg", "Pitch", lambda v: f"{v:.2f} deg"),
+                ("roll_deg", "Roll", lambda v: f"{v:.2f} deg"),
+                ("pitch_rate_dps", "Pitch Rate", lambda v: f"{v:.2f} deg/s"),
+                ("roll_rate_dps", "Roll Rate", lambda v: f"{v:.2f} deg/s"),
             ],
         )
         thrusters = self._make_thruster_section()
@@ -655,12 +672,14 @@ class MainWindow(QMainWindow):
         self.controller_active = False
         self.controller_armed = False
         self.controller_a_last_press_time = 0.0
+        self.controller_x_last_press_time = 0.0
         self.controller_missing_logged = False
         self.controller_deadzone = 0.08
         self.trigger_scale = 1.0
         self.yaw_scale = 1.0
         self.strafe_scale = 1.0
         self.vertical_scale = 1.0
+        self.horizontal_stabilization_enabled = False
         self._last_battery_cutoff_state = False
         self._last_presented_ts: Optional[float] = None
         self._presented_fps_ema = 0.0
@@ -984,6 +1003,15 @@ class MainWindow(QMainWindow):
                     self.controller_a_last_press_time = now
                     self.log_tab.append_log("Controller ARMED" if self.controller_armed else "Controller DISARMED")
 
+        if hasattr(xbox360_controller, "X") and xbox360_controller.X < len(buttons):
+            if buttons[xbox360_controller.X]:
+                now = time.time()
+                if now - self.controller_x_last_press_time > 0.5:
+                    self.horizontal_stabilization_enabled = not self.horizontal_stabilization_enabled
+                    self.controller_x_last_press_time = now
+                    state_text = "ENABLED" if self.horizontal_stabilization_enabled else "DISABLED"
+                    self.log_tab.append_log(f"Horizontal stabilization {state_text}")
+
         deadzone = self.controller_deadzone
         trigger_scale = self.trigger_scale
         yaw_scale = self.yaw_scale
@@ -994,6 +1022,12 @@ class MainWindow(QMainWindow):
         lt_y = self._clamp(self._apply_deadzone(float(lt_y), deadzone) * vertical_scale, -1.0, 1.0)
         rt_x = self._clamp(self._apply_deadzone(float(rt_x), deadzone) * yaw_scale, -1.0, 1.0)
         triggers = self._clamp(self._apply_deadzone(float(triggers), deadzone) * trigger_scale, -1.0, 1.0)
+
+        manual_pitch_input = abs(lt_y) > 0.05 or pad_up > 0 or pad_down > 0
+        manual_roll_input = abs(lt_x) > 0.05
+        if self.horizontal_stabilization_enabled and (manual_pitch_input or manual_roll_input):
+            self.horizontal_stabilization_enabled = False
+            self.log_tab.append_log("Horizontal stabilization DISABLED by manual pitch/roll input")
 
         yaw_flag = False
         pitch_flag = False
@@ -1043,6 +1077,7 @@ class MainWindow(QMainWindow):
             "m3": self._clamp(m3 * 100.0, -100.0, 100.0),
             "m4": self._clamp(m4 * 100.0, -100.0, 100.0),
             "arm": self.controller_armed,
+            "stabilize_horizontal": self.horizontal_stabilization_enabled,
         }
         if self.udp_worker is not None:
             self.udp_worker.update_command(payload)
@@ -1053,6 +1088,7 @@ class MainWindow(QMainWindow):
         self.telemetry.m3 = int(payload["m1"])
         self.telemetry.m4 = int(payload["m2"])
         self.telemetry.armed = self.controller_armed
+        self.telemetry.stabilization_enabled = self.horizontal_stabilization_enabled
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
         self._update_video_overlay()
@@ -1223,7 +1259,12 @@ class MainWindow(QMainWindow):
         self.link_ready = False
         self.connection_timer.stop()
         self._link_start_time = None
+        self.controller_armed = False
+        self.horizontal_stabilization_enabled = False
+        self.telemetry.armed = False
+        self.telemetry.stabilization_enabled = False
         self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
         self.video_status.setText("Video: idle")
         self.link_status.setText("UDP: idle")
         self.video_label.setText("Video not connected")
@@ -1328,11 +1369,17 @@ class MainWindow(QMainWindow):
     def send_arm_state(self, armed: bool):
         self.controller_armed = armed
         self.telemetry.armed = armed
+        self.telemetry.stabilization_enabled = self.horizontal_stabilization_enabled
         self.telemetry_panel.update_telemetry(self.telemetry)
         self._update_arm_buttons()
         self._update_video_overlay()
         if self.udp_worker is not None:
-            self.udp_worker.update_command({"arm": armed})
+            self.udp_worker.update_command(
+                {
+                    "arm": armed,
+                    "stabilize_horizontal": self.horizontal_stabilization_enabled,
+                }
+            )
         self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")
 
     @Slot()

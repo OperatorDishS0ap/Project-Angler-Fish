@@ -30,11 +30,10 @@ PERIOD_US = int(1_000_000 / ESC_FREQ_HZ)  # 2500us @ 400Hz
 PWM_RANGE = PERIOD_US                      # range=2500 => dutycycle "counts" == microseconds
 
 PULSE_MIN = 1400
-PULSE_MAX = 1650
+PULSE_MAX = 1600
 
 PULSE_NEUTRAL = 1460
 
-# "Creep zone" to avoid sending (neutral, 1600]
 AVOID_LO = 1406
 AVOID_HI = 1514
 FORWARD_START = AVOID_HI + 1  # 1515
@@ -46,6 +45,14 @@ LOCK_PATH = "/tmp/anglerfish_motors.lock"
 POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
 POWER_STATE_CHECK_S = float(os.environ.get("ANGLERFISH_POWER_STATE_CHECK_S", "0.1"))
 BATTERY_CUTOFF_THROTTLE_V = float(os.environ.get("ANGLERFISH_BATTERY_CUTOFF_THROTTLE_V", "5.8"))
+PITCH_KP = float(os.environ.get("ANGLERFISH_STABILIZATION_PITCH_KP", "2.4"))
+PITCH_KD = float(os.environ.get("ANGLERFISH_STABILIZATION_PITCH_KD", "0.18"))
+ROLL_KP = float(os.environ.get("ANGLERFISH_STABILIZATION_ROLL_KP", "2.4"))
+ROLL_KD = float(os.environ.get("ANGLERFISH_STABILIZATION_ROLL_KD", "0.18"))
+ANGLE_ERROR_MARGIN_PCT = float(os.environ.get("ANGLERFISH_STABILIZATION_ERROR_MARGIN_PCT", "5.0"))
+ANGLE_ERROR_MARGIN_MIN_DEG = float(os.environ.get("ANGLERFISH_STABILIZATION_ERROR_MARGIN_MIN_DEG", "3.0"))
+STABILIZE_TARGET_PITCH_DEG = float(os.environ.get("ANGLERFISH_STABILIZATION_TARGET_PITCH_DEG", "0.0"))
+STABILIZE_TARGET_ROLL_DEG = float(os.environ.get("ANGLERFISH_STABILIZATION_TARGET_ROLL_DEG", "0.0"))
 
 # Small command deadband: treat tiny commands as neutral
 PCT_DEADBAND = 2.0  # percent
@@ -62,6 +69,19 @@ CMD_SIZE_OLD = struct.calcsize(CMD_FMT_OLD)
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+
+def apply_error_margin(error_deg: float, target_deg: float, margin_pct: float) -> float:
+    margin_deg = max(abs(target_deg) * (margin_pct / 100.0), ANGLE_ERROR_MARGIN_MIN_DEG)
+    if abs(error_deg) <= margin_deg:
+        return 0.0
+    return error_deg
+
+
+def mix_stabilization_motors(pitch_command: float, roll_command: float):
+    m3 = clamp(-pitch_command - roll_command, -100.0, 100.0)
+    m4 = clamp(-pitch_command + roll_command, -100.0, 100.0)
+    return m3, m4
 
 
 def acquire_single_instance_lock(lock_path: str):
@@ -169,14 +189,10 @@ def read_power_state(path: str):
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
-            return None, False, False, None
-        battery_v = data.get("battery_v")
-        battery_cutoff_active = bool(data.get("battery_cutoff_active", False))
-        esc_overtemp_active = bool(data.get("esc_overtemp_active", False))
-        esc_max_temp_c = data.get("esc_max_temp_c")
-        return battery_v, battery_cutoff_active, esc_overtemp_active, esc_max_temp_c
+            return {}
+        return data
     except Exception:
-        return None, False, False, None
+        return {}
 
 
 def main():
@@ -217,6 +233,13 @@ def main():
     last_battery_v = None
     last_esc_temp_c = None
     last_power_state_check = 0.0
+    attitude_ready = False
+    pitch_deg = 0.0
+    roll_deg = 0.0
+    pitch_rate_dps = 0.0
+    roll_rate_dps = 0.0
+    stabilize_horizontal = False
+    last_stabilize_horizontal = False
 
     print(f"[sub_motors_400hz] Listening UDP on {LISTEN_IP}:{LISTEN_PORT}")
 
@@ -268,7 +291,18 @@ def main():
                             "m4": float(msg.get("m4", last["m4"])),
                         }
                         arm_requested = bool(msg.get("arm", arm_requested))
+                        stabilize_horizontal = bool(msg.get("stabilize_horizontal", stabilize_horizontal))
                         last_command_ts = time.time()
+
+                        if stabilize_horizontal != last_stabilize_horizontal:
+                            if stabilize_horizontal:
+                                print(
+                                    f"[sub_motors_400hz] Horizontal stabilization ENABLED "
+                                    f"(target_pitch={STABILIZE_TARGET_PITCH_DEG:.2f}, target_roll={STABILIZE_TARGET_ROLL_DEG:.2f})"
+                                )
+                            else:
+                                print("[sub_motors_400hz] Horizontal stabilization DISABLED")
+                            last_stabilize_horizontal = stabilize_horizontal
 
 
             except socket.timeout:
@@ -279,7 +313,16 @@ def main():
             now = time.time()
             if (now - last_power_state_check) >= max(0.02, POWER_STATE_CHECK_S):
                 last_power_state_check = now
-                battery_v, battery_cutoff_state, esc_overtemp_state, esc_max_temp_c = read_power_state(POWER_STATE_PATH)
+                power_state = read_power_state(POWER_STATE_PATH)
+                battery_v = power_state.get("battery_v")
+                battery_cutoff_state = bool(power_state.get("battery_cutoff_active", False))
+                esc_overtemp_state = bool(power_state.get("esc_overtemp_active", False))
+                esc_max_temp_c = power_state.get("esc_max_temp_c")
+                attitude_ready = bool(power_state.get("attitude_ready", False))
+                pitch_deg = float(power_state.get("pitch_deg", 0.0) or 0.0)
+                roll_deg = float(power_state.get("roll_deg", 0.0) or 0.0)
+                pitch_rate_dps = float(power_state.get("pitch_rate_dps", 0.0) or 0.0)
+                roll_rate_dps = float(power_state.get("roll_rate_dps", 0.0) or 0.0)
                 if battery_v is not None:
                     try:
                         last_battery_v = float(battery_v)
@@ -333,12 +376,33 @@ def main():
                     arm_active = True
                     print("[sub_motors_400hz] ESC output armed.")
 
+            output = dict(last)
+            manual_attitude_override = abs(output["m3"]) > PCT_DEADBAND or abs(output["m4"]) > PCT_DEADBAND
+            stabilization_active = arm_active and stabilize_horizontal and attitude_ready and not manual_attitude_override
+
+            if stabilization_active:
+                pitch_error = apply_error_margin(
+                    STABILIZE_TARGET_PITCH_DEG - pitch_deg,
+                    STABILIZE_TARGET_PITCH_DEG,
+                    ANGLE_ERROR_MARGIN_PCT,
+                )
+                roll_error = apply_error_margin(
+                    STABILIZE_TARGET_ROLL_DEG - roll_deg,
+                    STABILIZE_TARGET_ROLL_DEG,
+                    ANGLE_ERROR_MARGIN_PCT,
+                )
+                pitch_command = (PITCH_KP * pitch_error) - (PITCH_KD * pitch_rate_dps)
+                roll_command = (ROLL_KP * roll_error) - (ROLL_KD * roll_rate_dps)
+                stabilize_m3, stabilize_m4 = mix_stabilization_motors(pitch_command, roll_command)
+                output["m3"] = clamp(output["m3"] + stabilize_m3, -100.0, 100.0)
+                output["m4"] = clamp(output["m4"] + stabilize_m4, -100.0, 100.0)
+
             # Apply outputs (PWM @ 400Hz)
             if arm_active:
-                pi = set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(last["m1"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                pi = set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(last["m2"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                pi = set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(last["m3"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
-                pi = set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(last["m4"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M1, pct_to_pulse_us(output["m1"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M2, pct_to_pulse_us(output["m2"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M3, pct_to_pulse_us(output["m3"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
+                pi = set_pulse_us(pi, GPIO_M4, pct_to_pulse_us(output["m4"], pulse_min_us, pulse_max_us), pulse_min_us, pulse_max_us)
             else:
                 for g in ALL_GPIOS:
                     pi = set_pulse_us(pi, g, PULSE_NEUTRAL, pulse_min_us, pulse_max_us)

@@ -12,8 +12,8 @@ from libcamera import Transform
 # ----------------------------
 WIDTH = 1280
 HEIGHT = 720
-FPS = 60
-BITRATE = 3_000_000
+FPS = 30
+BITRATE = 12_000_000
 RTSP_URL = "rtsp://anglerfish.local:8554/cam"
 
 running = True
@@ -46,7 +46,7 @@ def main():
     encoder = H264Encoder(
         bitrate=BITRATE,
         repeat=True,
-        iperiod=15,
+        iperiod=10,
     )
 
     # Publish directly to MediaMTX over RTSP using UDP transport for lower latency.

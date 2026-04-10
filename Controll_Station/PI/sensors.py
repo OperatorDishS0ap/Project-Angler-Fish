@@ -7,15 +7,15 @@ import time
 import math
 from typing import Optional
 from bar30_sensor import init_bar30, read_bar30
-from mpu6050_sensor import init_imu_with_retry, read_imu
+from mpu6050_sensor import accel_to_pitch_roll, calibrate_gyro, init_imu_with_retry, read_imu
 from ads1015_sensor import init_ads1015, read_ads1015
 
 USE_BROADCAST = os.environ.get("ANGLERFISH_USE_BROADCAST", "1") == "1"
 BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
 PC_IP = os.environ.get("ANGLERFISH_PC_IP", "192.168.137.1")  # used when ANGLERFISH_USE_BROADCAST=0
 PC_PORT = int(os.environ.get("ANGLERFISH_PC_PORT", "9001"))
-ENABLE_BAR30 = os.environ.get("ANGLERFISH_ENABLE_BAR30", "0") == "1"
-ENABLE_MPU6050 = os.environ.get("ANGLERFISH_ENABLE_MPU6050", "0") == "1"
+ENABLE_BAR30 = os.environ.get("ANGLERFISH_ENABLE_BAR30", "1") == "1"
+ENABLE_MPU6050 = os.environ.get("ANGLERFISH_ENABLE_MPU6050", "1") == "1"
 ENABLE_ADS1015 = os.environ.get("ANGLERFISH_ENABLE_ADS1015", "1") == "1"
 DEBUG = os.environ.get("ANGLERFISH_SENSOR_DEBUG", "1") == "1"
 
@@ -31,6 +31,9 @@ ESC_OVERTEMP_C = float(os.environ.get("ANGLERFISH_ESC_OVERTEMP_C", "90.0"))
 ESC_OVERTEMP_CLEAR_C = float(os.environ.get("ANGLERFISH_ESC_OVERTEMP_CLEAR_C", "85.0"))
 BATTERY_EMA_ALPHA = float(os.environ.get("ANGLERFISH_BATTERY_EMA_ALPHA", "0.2"))
 POWER_STATE_PATH = os.environ.get("ANGLERFISH_POWER_STATE_PATH", "/tmp/anglerfish_power_state.json")
+COMPLEMENTARY_ALPHA = float(os.environ.get("ANGLERFISH_COMPLEMENTARY_ALPHA", "0.98"))
+GYRO_CALIBRATION_SAMPLES = int(os.environ.get("ANGLERFISH_GYRO_CALIBRATION_SAMPLES", "200"))
+GYRO_CALIBRATION_DELAY_S = float(os.environ.get("ANGLERFISH_GYRO_CALIBRATION_DELAY_S", "0.005"))
 
 
 def _hz_to_interval(hz: float, min_hz: float = 0.1) -> float:
@@ -44,13 +47,49 @@ def _ema(prev_value: Optional[float], sample: float, alpha: float) -> float:
     return (a * float(sample)) + ((1.0 - a) * float(prev_value))
 
 
-def _write_power_state(path: str, battery_v: float, cutoff_active: bool, esc_overtemp_active: bool, esc_max_temp_c: float):
+def _initialize_attitude_state(imu_dev):
+    if imu_dev is None:
+        return 0.0, 0.0, {"x": 0.0, "y": 0.0, "z": 0.0}, False
+
+    print("[sensors] Calibrating MPU6050 gyro; keep the ROV still and level...")
+    try:
+        gyro_bias = calibrate_gyro(
+            imu_dev,
+            samples=GYRO_CALIBRATION_SAMPLES,
+            delay_s=GYRO_CALIBRATION_DELAY_S,
+        )
+        accel, _gyro, _imu_temp = read_imu(imu_dev)
+    except OSError as exc:
+        print(f"[sensors] MPU6050 calibration failed: {exc}")
+        return 0.0, 0.0, {"x": 0.0, "y": 0.0, "z": 0.0}, False
+
+    pitch_deg, roll_deg = accel_to_pitch_roll(accel)
+    return pitch_deg, roll_deg, gyro_bias, True
+
+
+def _write_power_state(
+    path: str,
+    battery_v: float,
+    cutoff_active: bool,
+    esc_overtemp_active: bool,
+    esc_max_temp_c: float,
+    pitch_deg: float,
+    roll_deg: float,
+    pitch_rate_dps: float,
+    roll_rate_dps: float,
+    attitude_ready: bool,
+):
     payload = {
         "ts": time.time(),
         "battery_v": float(battery_v),
         "battery_cutoff_active": bool(cutoff_active),
         "esc_overtemp_active": bool(esc_overtemp_active),
         "esc_max_temp_c": float(esc_max_temp_c),
+        "pitch_deg": float(pitch_deg),
+        "roll_deg": float(roll_deg),
+        "pitch_rate_dps": float(pitch_rate_dps),
+        "roll_rate_dps": float(roll_rate_dps),
+        "attitude_ready": bool(attitude_ready),
     }
     tmp_path = f"{path}.tmp"
     try:
@@ -70,6 +109,7 @@ def main():
     sensor = init_bar30() if ENABLE_BAR30 else None
     imu = init_imu_with_retry() if ENABLE_MPU6050 else None
     ads = init_ads1015() if ENABLE_ADS1015 else None
+    pitch_deg, roll_deg, gyro_bias, attitude_ready = _initialize_attitude_state(imu)
 
     print(
         f"[sensors] Sensor toggles: BAR30={'ON' if ENABLE_BAR30 else 'OFF'} "
@@ -121,6 +161,11 @@ def main():
         "esc_overtemp_active": False,
         "speed_mps": 0.0,
         "accel_mps2": 0.0,
+        "pitch_deg": 0.0,
+        "roll_deg": 0.0,
+        "pitch_rate_dps": 0.0,
+        "roll_rate_dps": 0.0,
+        "attitude_ready": attitude_ready,
         "current_a": 0.0,
         "current_adc_v": 0.0,
         "pi_temp_c": 0.0,
@@ -136,6 +181,7 @@ def main():
     next_ads_ts = now
 
     last_mpu_update_ts = now
+    last_attitude_update_ts = now
     last_imu_reconnect_try = 0.0
     last_ads_reconnect_try = 0.0
     battery_filtered_v: Optional[float] = None
@@ -158,18 +204,42 @@ def main():
 
         if now >= next_mpu_ts:
             accel = {"x": 0.0, "y": 0.0, "z": GRAVITY}
+            gyro = {"x": 0.0, "y": 0.0, "z": 0.0}
             imu_temp = 0.0
 
             if imu is not None:
                 try:
-                    accel, imu_temp = read_imu(imu)
+                    accel, gyro, imu_temp = read_imu(imu)
                 except OSError as exc:
                     print(f"[sensors] MPU6050 read failed: {exc}")
                     imu = None
+                    attitude_ready = False
+                    gyro_bias = {"x": 0.0, "y": 0.0, "z": 0.0}
 
             if ENABLE_MPU6050 and imu is None and (now - last_imu_reconnect_try) >= 2.0:
                 last_imu_reconnect_try = now
                 imu = init_imu_with_retry(retries=1, delay_s=0.0)
+                pitch_deg, roll_deg, gyro_bias, attitude_ready = _initialize_attitude_state(imu)
+                last_attitude_update_ts = now
+
+            accel_pitch_deg, accel_roll_deg = accel_to_pitch_roll(accel)
+            pitch_rate_dps = float(gyro.get("x", 0.0)) - float(gyro_bias.get("x", 0.0))
+            roll_rate_dps = float(gyro.get("z", 0.0)) - float(gyro_bias.get("z", 0.0))
+
+            if attitude_ready:
+                elapsed_attitude = max(0.0, now - last_attitude_update_ts)
+                pitch_deg = (
+                    (COMPLEMENTARY_ALPHA * (pitch_deg + (pitch_rate_dps * elapsed_attitude)))
+                    + ((1.0 - COMPLEMENTARY_ALPHA) * accel_pitch_deg)
+                )
+                roll_deg = (
+                    (COMPLEMENTARY_ALPHA * (roll_deg + (roll_rate_dps * elapsed_attitude)))
+                    + ((1.0 - COMPLEMENTARY_ALPHA) * accel_roll_deg)
+                )
+            else:
+                pitch_deg = accel_pitch_deg
+                roll_deg = accel_roll_deg
+            last_attitude_update_ts = now
 
             accel_magnitude = math.sqrt(accel["x"] ** 2 + accel["y"] ** 2 + accel["z"] ** 2)
             motion_accel = max(0.0, accel_magnitude - GRAVITY)
@@ -184,6 +254,11 @@ def main():
             telemetry["enclosure_temp_c"] = round(float(imu_temp), 3)
             telemetry["speed_mps"] = round(float(speed), 4)
             telemetry["accel_mps2"] = round(float(motion_accel), 4)
+            telemetry["pitch_deg"] = round(float(pitch_deg), 3)
+            telemetry["roll_deg"] = round(float(roll_deg), 3)
+            telemetry["pitch_rate_dps"] = round(float(pitch_rate_dps), 3)
+            telemetry["roll_rate_dps"] = round(float(roll_rate_dps), 3)
+            telemetry["attitude_ready"] = bool(attitude_ready)
             next_mpu_ts = now + mpu_interval
 
         if now >= next_pi_temp_ts:
@@ -250,6 +325,11 @@ def main():
                     battery_cutoff_active,
                     esc_overtemp_active,
                     esc_max_temp_c,
+                    telemetry["pitch_deg"],
+                    telemetry["roll_deg"],
+                    telemetry["pitch_rate_dps"],
+                    telemetry["roll_rate_dps"],
+                    telemetry["attitude_ready"],
                 )
                 if DEBUG:
                     print(
