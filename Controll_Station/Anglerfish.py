@@ -213,6 +213,7 @@ class UdpLinkWorker(QThread):
             "m4": 0.0,
             "arm": False,
             "stabilize_horizontal": False,
+            "imu_home": False,
         }
 
     def stop(self):
@@ -232,6 +233,8 @@ class UdpLinkWorker(QThread):
 
     def _build_motor_command_payload(self) -> dict:
         armed = bool(self._latest_command.get("arm", self._latest_command.get("armed", False)))
+        imu_home = bool(self._latest_command.get("imu_home", False))
+        self._latest_command["imu_home"] = False
         return {
             "type": "command",
             "m1": float(self._latest_command.get("m1", 0.0)) if armed else 0.0,
@@ -240,6 +243,7 @@ class UdpLinkWorker(QThread):
             "m4": float(self._latest_command.get("m4", 0.0)) if armed else 0.0,
             "arm": armed,
             "stabilize_horizontal": bool(self._latest_command.get("stabilize_horizontal", False)),
+            "imu_home": imu_home,
         }
 
     @staticmethod
@@ -673,6 +677,7 @@ class MainWindow(QMainWindow):
         self.controller_armed = False
         self.controller_a_last_press_time = 0.0
         self.controller_x_last_press_time = 0.0
+        self.controller_y_last_press_time = 0.0
         self.controller_missing_logged = False
         self.controller_deadzone = 0.08
         self.trigger_scale = 1.0
@@ -680,6 +685,7 @@ class MainWindow(QMainWindow):
         self.strafe_scale = 1.0
         self.vertical_scale = 1.0
         self.horizontal_stabilization_enabled = False
+        self.horizontal_stabilization_resume_after_manual = False
         self._last_battery_cutoff_state = False
         self._last_presented_ts: Optional[float] = None
         self._presented_fps_ema = 0.0
@@ -983,6 +989,8 @@ class MainWindow(QMainWindow):
         if not self._try_initialize_controller():
             return
 
+        imu_home_requested = False
+
         try:
             pygame.event.pump()
             buttons = self.controller_device.get_buttons()
@@ -1008,9 +1016,18 @@ class MainWindow(QMainWindow):
                 now = time.time()
                 if now - self.controller_x_last_press_time > 0.5:
                     self.horizontal_stabilization_enabled = not self.horizontal_stabilization_enabled
+                    self.horizontal_stabilization_resume_after_manual = False
                     self.controller_x_last_press_time = now
                     state_text = "ENABLED" if self.horizontal_stabilization_enabled else "DISABLED"
                     self.log_tab.append_log(f"Horizontal stabilization {state_text}")
+
+        if hasattr(xbox360_controller, "Y") and xbox360_controller.Y < len(buttons):
+            if buttons[xbox360_controller.Y]:
+                now = time.time()
+                if now - self.controller_y_last_press_time > 0.5:
+                    self.controller_y_last_press_time = now
+                    imu_home_requested = True
+                    self.log_tab.append_log("IMU home requested")
 
         deadzone = self.controller_deadzone
         trigger_scale = self.trigger_scale
@@ -1027,7 +1044,16 @@ class MainWindow(QMainWindow):
         manual_roll_input = abs(lt_x) > 0.05
         if self.horizontal_stabilization_enabled and (manual_pitch_input or manual_roll_input):
             self.horizontal_stabilization_enabled = False
+            self.horizontal_stabilization_resume_after_manual = True
             self.log_tab.append_log("Horizontal stabilization DISABLED by manual pitch/roll input")
+        elif (
+            self.horizontal_stabilization_resume_after_manual
+            and not manual_pitch_input
+            and not manual_roll_input
+        ):
+            self.horizontal_stabilization_enabled = True
+            self.horizontal_stabilization_resume_after_manual = False
+            self.log_tab.append_log("Horizontal stabilization RE-ENABLED after manual input")
 
         yaw_flag = False
         pitch_flag = False
@@ -1078,6 +1104,7 @@ class MainWindow(QMainWindow):
             "m4": self._clamp(m4 * 100.0, -100.0, 100.0),
             "arm": self.controller_armed,
             "stabilize_horizontal": self.horizontal_stabilization_enabled,
+            "imu_home": imu_home_requested,
         }
         if self.udp_worker is not None:
             self.udp_worker.update_command(payload)
@@ -1261,6 +1288,7 @@ class MainWindow(QMainWindow):
         self._link_start_time = None
         self.controller_armed = False
         self.horizontal_stabilization_enabled = False
+        self.horizontal_stabilization_resume_after_manual = False
         self.telemetry.armed = False
         self.telemetry.stabilization_enabled = False
         self._update_arm_buttons()
@@ -1368,6 +1396,8 @@ class MainWindow(QMainWindow):
 
     def send_arm_state(self, armed: bool):
         self.controller_armed = armed
+        if not armed:
+            self.horizontal_stabilization_resume_after_manual = False
         self.telemetry.armed = armed
         self.telemetry.stabilization_enabled = self.horizontal_stabilization_enabled
         self.telemetry_panel.update_telemetry(self.telemetry)
@@ -1378,6 +1408,7 @@ class MainWindow(QMainWindow):
                 {
                     "arm": armed,
                     "stabilize_horizontal": self.horizontal_stabilization_enabled,
+                    "imu_home": False,
                 }
             )
         self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")

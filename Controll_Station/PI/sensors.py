@@ -21,7 +21,7 @@ DEBUG = os.environ.get("ANGLERFISH_SENSOR_DEBUG", "1") == "1"
 
 TELEMETRY_SEND_HZ = float(os.environ.get("ANGLERFISH_TELEMETRY_SEND_HZ", "2.0"))
 BAR30_HZ = float(os.environ.get("ANGLERFISH_BAR30_HZ", "2.0"))
-MPU6050_HZ = float(os.environ.get("ANGLERFISH_MPU6050_HZ", "20.0"))
+MPU6050_HZ = float(os.environ.get("ANGLERFISH_MPU6050_HZ", "100.0"))
 PI_TEMP_HZ = float(os.environ.get("ANGLERFISH_PI_TEMP_HZ", "2.0"))
 BATTERY_HZ = float(os.environ.get("ANGLERFISH_BATTERY_HZ", "2.0"))
 ADS1015_HZ = float(os.environ.get("ANGLERFISH_ADS1015_HZ", "8.0"))
@@ -259,6 +259,20 @@ def main():
             telemetry["pitch_rate_dps"] = round(float(pitch_rate_dps), 3)
             telemetry["roll_rate_dps"] = round(float(roll_rate_dps), 3)
             telemetry["attitude_ready"] = bool(attitude_ready)
+
+            # Publish attitude state at IMU cadence so motors can stabilize with low latency.
+            _write_power_state(
+                POWER_STATE_PATH,
+                float(telemetry.get("battery_v", 0.0) or 0.0),
+                battery_cutoff_active,
+                esc_overtemp_active,
+                float(telemetry.get("esc_max_temp_c", 0.0) or 0.0),
+                telemetry["pitch_deg"],
+                telemetry["roll_deg"],
+                telemetry["pitch_rate_dps"],
+                telemetry["roll_rate_dps"],
+                telemetry["attitude_ready"],
+            )
             next_mpu_ts = now + mpu_interval
 
         if now >= next_pi_temp_ts:
@@ -319,18 +333,6 @@ def main():
             }
             try:
                 sock.sendto(json.dumps(payload).encode("utf-8"), (target_ip, PC_PORT))
-                _write_power_state(
-                    POWER_STATE_PATH,
-                    battery_v_now,
-                    battery_cutoff_active,
-                    esc_overtemp_active,
-                    esc_max_temp_c,
-                    telemetry["pitch_deg"],
-                    telemetry["roll_deg"],
-                    telemetry["pitch_rate_dps"],
-                    telemetry["roll_rate_dps"],
-                    telemetry["attitude_ready"],
-                )
                 if DEBUG:
                     print(
                         f"[sensors] Sent telemetry to {target_ip}:{PC_PORT}: "
