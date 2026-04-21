@@ -4,6 +4,6 @@
 ![Motor Block Diagram](images/motor_block.jpg)
 ![Motor Hardware](images/thruster_3d.jpg)
 ![Controller and Sub Diagram](images/controler_diagram.jpg)
-![Input Mapping](imaages/input_map.jpg)
+![Input Mapping](images/input_map.jpg)
 ![Telemetry Block Diagram](images/telemetry_block.jpg)
 ![BAR30 Harware](images/bar30_3d.jpg)
