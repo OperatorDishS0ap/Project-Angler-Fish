@@ -18,6 +18,10 @@ To promote accessibility and encourage further development, all design files, so
 ![flowchart](Images/flowchart.jpg)  
 ![explodedview](Images/ExplodedView.jpg)  
 
+![Submarine](Documentation/images/submarine.JPEG)
+![Submarine in the Pool](Documentation/images/underwater.jpg)
+![Camera View](Documentation/images/camera.jpg)
+
 This Project is a Student Senior Capstone Project for the University of West Florida, Hal Marcus College of Science and Engineering  
 ![UWF](Images/UWFLogo_Main.svg)  
 
