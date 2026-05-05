@@ -11,9 +11,9 @@ import time
 # ----------------------------
 WIDTH = 1280
 HEIGHT = 720
-FPS = 60
-BITRATE = 12_000_000
-RTP_HOST = "192.168.1.30"
+FPS = 30
+BITRATE = 4_000_000
+RTP_HOST = "192.168.1.52"
 RTP_PORT = int(os.environ.get("ANGLERFISH_RTP_PORT", "5600"))
 
 running = True
@@ -44,6 +44,8 @@ def main():
         str(BITRATE),
         "--codec",
         "h264",
+        "--intra",
+        "15",
         "--hflip",
         "--vflip",
         "--timeout",
@@ -57,11 +59,11 @@ def main():
         "fdsrc",
         "!",
         "h264parse",
-        "config-interval=1",
+        "config-interval=-1",
         "!",
         "rtph264pay",
         "pt=96",
-        "config-interval=1",
+        "config-interval=-1",
         "!",
         "udpsink",
         f"host={RTP_HOST}",

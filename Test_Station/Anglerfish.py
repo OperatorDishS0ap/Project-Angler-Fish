@@ -117,7 +117,7 @@ class VideoWorker(QThread):
         parsed = urlparse(source)
         port = parsed.port or 5600
         gst_bin = os.path.join(
-            os.environ.get("GST_BIN_DIR", r"C:\Users\thesk\AppData\Local\Programs\gstreamer\1.0\msvc_x86_64\bin"),
+            os.environ.get("GST_BIN_DIR", r"C:\Program Files\gstreamer\1.0\msvc_x86_64\bin"),
             "gst-launch-1.0.exe",
         )
         if not os.path.isfile(gst_bin):
@@ -127,10 +127,12 @@ class VideoWorker(QThread):
         return [
             gst_bin, "-q",
             "udpsrc", f"port={port}", f"caps={caps_str}",
-            "!", "rtpjitterbuffer", "latency=20", "drop-on-latency=true",
+            "!", "rtpjitterbuffer", "latency=150", "max-misorder-time=100",
             "!", "rtph264depay",
             "!", "h264parse",
-            "!", "avdec_h264",
+            "!", "queue", "max-size-buffers=5", "leaky=downstream",
+            "!", "avdec_h264", "output-corrupt=false",
+            "!", "queue", "max-size-buffers=3", "leaky=downstream",
             "!", "videoconvert",
             "!", "videoscale",
             "!", out_caps,
