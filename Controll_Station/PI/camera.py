@@ -10,9 +10,9 @@ from libcamera import Transform
 # ----------------------------
 # Settings
 # ----------------------------
-WIDTH = 1280
-HEIGHT = 720
-FPS = 30
+WIDTH = 720
+HEIGHT = 480
+FPS = 60
 BITRATE = 12_000_000
 RTSP_URL = "rtsp://anglerfish.local:8554/cam"
 
@@ -32,9 +32,9 @@ def main():
 
     picam2 = Picamera2()
 
-    # Use YUV420 for video encoding to keep the pipeline efficient.
+
     config = picam2.create_video_configuration(
-        main={"size": (WIDTH, HEIGHT), "format": "YUV420"},
+        main={"size": (WIDTH, HEIGHT), "format": "XBGR8888"},
         controls={"FrameRate": FPS},
         transform=Transform(hflip=1, vflip=1),
         buffer_count=3,
@@ -46,7 +46,7 @@ def main():
     encoder = H264Encoder(
         bitrate=BITRATE,
         repeat=True,
-        iperiod=10,
+        iperiod=15,
     )
 
     # Publish directly to MediaMTX over RTSP using UDP transport for lower latency.

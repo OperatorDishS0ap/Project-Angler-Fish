@@ -1,0 +1,2728 @@
+import sys
+import time
+import json
+import socket
+import os
+import shlex
+import subprocess
+import tempfile
+import zipfile
+from urllib.parse import urlparse
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Optional
+
+import cv2
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
+try:
+    import xbox360_controller
+except ImportError:
+    xbox360_controller = None
+
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QSettings
+from PySide6.QtGui import QAction, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QStatusBar,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+# ============================================================
+# Data models
+# ============================================================
+@dataclass
+class TelemetryData:
+    timer_s: float = 0.0
+    battery_v: float = 0.0
+    esc_overtemp_active: bool = False
+    esc_max_temp_c: float = 0.0
+    current_a: float = 0.0
+    current_adc_v: float = 0.0
+    pi_temp_c: float = 0.0
+    video_fps: float = 0.0
+
+    depth_m: float = 0.0
+    pressure_bar: float = 0.0
+    water_temp_c: float = 0.0
+    enclosure_temp_c: float = 0.0
+    esc_temp_1_c: float = 0.0
+    esc_temp_2_c: float = 0.0
+
+    pitch_deg: float = 0.0
+    roll_deg: float = 0.0
+    pitch_rate_dps: float = 0.0
+    roll_rate_dps: float = 0.0
+
+    m1: int = 0
+    m2: int = 0
+    m3: int = 0
+    m4: int = 0
+
+    armed: bool = False
+    stabilization_enabled: bool = False
+
+class VideoWorker(QThread):
+    frame_ready = Signal(QImage)
+    stats_ready = Signal(dict)
+    status_changed = Signal(str)
+
+    def __init__(self, rtsp_url: str, parent=None):
+        super().__init__(parent)
+        self.rtsp_url = rtsp_url
+        self._running = True
+        self._capture = None
+        self._frame_pending = False
+
+    @staticmethod
+    def _is_udp_ts_source(source: str) -> bool:
+        return (urlparse(source).scheme or "").lower() == "udp"
+
+    @staticmethod
+    def _is_rtp_source(source: str) -> bool:
+        return (urlparse(source).scheme or "").lower() == "rtp"
+
+    @staticmethod
+    def _build_rtp_gst_process_args(source: str, width: int, height: int) -> list:
+        """Build gst-launch-1.0 args that decode RTP H264 and write raw BGR frames to stdout.
+
+        Each pipeline token is a separate list entry so subprocess can exec without shell=True.
+        """
+        parsed = urlparse(source)
+        port = parsed.port or 5600
+        gst_bin = os.path.join(
+            os.environ.get("GST_BIN_DIR", r"C:\Users\thesk\AppData\Local\Programs\gstreamer\1.0\msvc_x86_64\bin"),
+            "gst-launch-1.0.exe",
+        )
+        if not os.path.isfile(gst_bin):
+            gst_bin = "gst-launch-1.0"
+        caps_str = f"application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
+        out_caps = f"video/x-raw,format=BGR,width={width},height={height}"
+        return [
+            gst_bin, "-q",
+            "udpsrc", f"port={port}", f"caps={caps_str}",
+            "!", "rtpjitterbuffer", "latency=20", "drop-on-latency=true",
+            "!", "rtph264depay",
+            "!", "h264parse",
+            "!", "avdec_h264",
+            "!", "videoconvert",
+            "!", "videoscale",
+            "!", out_caps,
+            "!", "fdsink", "fd=1",
+        ]
+
+    def _run_rtp_subprocess(self):
+        """Receive RTP H264, decode via gst-launch subprocess, read raw BGR frames from pipe."""
+        import numpy as np
+        width, height = 720, 480
+        frame_bytes = width * height * 3
+
+        args = self._build_rtp_gst_process_args(self.rtsp_url, width, height)
+        self.status_changed.emit("Opening RTP stream via GStreamer pipe...")
+
+        env = os.environ.copy()
+        gst_bin_dir = os.path.dirname(args[0]) if os.path.isabs(args[0]) else ""
+        if gst_bin_dir:
+            env["PATH"] = gst_bin_dir + os.pathsep + env.get("PATH", "")
+            env["GST_PLUGIN_PATH"] = os.path.join(gst_bin_dir, "..", "lib", "gstreamer-1.0")
+
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                bufsize=0,
+            )
+        except FileNotFoundError:
+            self.status_changed.emit("Video stream failed to open (gst-launch-1.0 not found)")
+            return
+
+        self.status_changed.emit("Video connected")
+        prev_time = time.time()
+        fps = 0.0
+        fps_alpha = 0.2
+        buf = b""
+
+        try:
+            while self._running:
+                if proc.poll() is not None:
+                    self.status_changed.emit("Video read failed")
+                    break
+
+                chunk = proc.stdout.read(frame_bytes - len(buf))
+                if not chunk:
+                    self.status_changed.emit("Video read failed")
+                    break
+                buf += chunk
+
+                if len(buf) < frame_bytes:
+                    continue
+
+                raw = buf[:frame_bytes]
+                buf = buf[frame_bytes:]
+
+                frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+                now = time.time()
+                dt = max(now - prev_time, 1e-6)
+                fps_instant = 1.0 / dt
+                fps = fps_instant if fps <= 0.0 else fps_alpha * fps_instant + (1.0 - fps_alpha) * fps
+                fps = max(0.0, min(120.0, fps))
+                prev_time = now
+
+                rgb = frame[:, :, ::-1].copy()
+                image = QImage(rgb.data, width, height, width * 3, QImage.Format_RGB888).copy()
+                if not self._frame_pending:
+                    self._frame_pending = True
+                    self.frame_ready.emit(image)
+                self.stats_ready.emit({"decode_fps": fps})
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        self.status_changed.emit("Video stopped")
+
+    def _configure_low_latency_capture(self):
+        if self._capture is None:
+            return
+
+        # Best-effort latency reduction; OpenCV backend support varies by platform/build.
+        for prop_name, value in (
+            ("CAP_PROP_BUFFERSIZE", 1),
+            ("CAP_PROP_OPEN_TIMEOUT_MSEC", 3000),
+            ("CAP_PROP_READ_TIMEOUT_MSEC", 1000),
+        ):
+            prop = getattr(cv2, prop_name, None)
+            if prop is not None:
+                try:
+                    self._capture.set(prop, value)
+                except Exception:
+                    pass
+
+    def stop(self):
+        self._running = False
+
+    @Slot()
+    def mark_frame_presented(self):
+        self._frame_pending = False
+
+    def run(self):
+        if self._is_rtp_source(self.rtsp_url):
+            self._run_rtp_subprocess()
+            return
+
+        if self._is_udp_ts_source(self.rtsp_url):
+            # MPEG-TS over raw UDP — use FFmpeg backend (no GStreamer needed on PC)
+            parsed = urlparse(self.rtsp_url)
+            port = parsed.port or 5600
+            ffmpeg_url = f"udp://0.0.0.0:{port}"
+            self.status_changed.emit("Opening MPEG-TS/UDP video stream...")
+            ffmpeg_capture_options = (
+                "fflags;nobuffer|"
+                "flags;low_delay|"
+                "max_delay;0|"
+                "reorder_queue_size;0"
+            )
+            previous_capture_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options
+            try:
+                self._capture = cv2.VideoCapture(ffmpeg_url, cv2.CAP_FFMPEG)
+            finally:
+                if previous_capture_options is None:
+                    os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+                else:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_capture_options
+        elif self._is_rtp_source(self.rtsp_url):
+            self.status_changed.emit("Opening RTP/UDP video stream (GStreamer)...")
+            gstreamer_pipeline = self._build_rtp_gstreamer_pipeline(self.rtsp_url)
+            self._capture = cv2.VideoCapture(gstreamer_pipeline, cv2.CAP_GSTREAMER)
+        else:
+            self.status_changed.emit("Opening video stream...")
+            ffmpeg_capture_options = (
+                "rtsp_transport;udp|"
+                "fflags;nobuffer|"
+                "flags;low_delay|"
+                "max_delay;0|"
+                "reorder_queue_size;0"
+            )
+            previous_capture_options = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_capture_options
+            try:
+                self._capture = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            finally:
+                if previous_capture_options is None:
+                    os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+                else:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous_capture_options
+
+        self._configure_low_latency_capture()
+
+        if not self._capture.isOpened():
+            self.status_changed.emit("Video stream failed to open")
+            return
+
+        self.status_changed.emit("Video connected")
+        prev_time = time.time()
+        fps = 0.0
+        fps_alpha = 0.2
+
+        while self._running:
+            ok, frame = self._capture.read()
+            if not ok:
+                self.status_changed.emit("Video read failed")
+                break
+
+            now = time.time()
+            dt = max(now - prev_time, 1e-6)
+            fps_instant = 1.0 / dt
+            if fps <= 0.0:
+                fps = fps_instant
+            else:
+                fps = (fps_alpha * fps_instant) + ((1.0 - fps_alpha) * fps)
+            fps = max(0.0, min(120.0, fps))
+            prev_time = now
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb.shape
+            bytes_per_line = ch * w
+            image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+            if not self._frame_pending:
+                self._frame_pending = True
+                self.frame_ready.emit(image)
+            self.stats_ready.emit({"decode_fps": fps})
+
+        if self._capture is not None:
+            self._capture.release()
+        self.status_changed.emit("Video stopped")
+
+
+class UdpLinkWorker(QThread):
+    telemetry_received = Signal(dict)
+    log_message = Signal(str)
+    link_state = Signal(str)
+
+    def __init__(self, pi_host: str, cmd_port: int, telemetry_port: int, fallback_host: Optional[str] = None, parent=None):
+        super().__init__(parent)
+        self.pi_host = pi_host
+        self.cmd_port = cmd_port
+        self.telemetry_port = telemetry_port
+        self.fallback_host = (fallback_host or "").strip()
+        self._running = True
+        self._cmd_sock: Optional[socket.socket] = None
+        self._telemetry_sock: Optional[socket.socket] = None
+        self._resolved_cmd_host: Optional[str] = None
+        self._next_resolve_ts = 0.0
+        self._resolve_error_logged = False
+        self._broadcast_cmd_ip = "255.255.255.255"
+        self._broadcast_fallback_logged = False
+        self._latest_command = {
+            "m1": 0.0,
+            "m2": 0.0,
+            "m3": 0.0,
+            "m4": 0.0,
+            "arm": False,
+            "stabilize_horizontal": False,
+            "imu_home": False,
+        }
+
+    def stop(self):
+        self._running = False
+
+    @Slot(dict)
+    def update_command(self, cmd: dict):
+        if "armed" in cmd and "arm" not in cmd:
+            cmd = dict(cmd)
+            cmd["arm"] = bool(cmd["armed"])
+        self._latest_command.update(cmd)
+        if not bool(self._latest_command.get("arm", False)):
+            self._latest_command["m1"] = 0.0
+            self._latest_command["m2"] = 0.0
+            self._latest_command["m3"] = 0.0
+            self._latest_command["m4"] = 0.0
+
+    def _build_motor_command_payload(self) -> dict:
+        armed = bool(self._latest_command.get("arm", self._latest_command.get("armed", False)))
+        imu_home = bool(self._latest_command.get("imu_home", False))
+        self._latest_command["imu_home"] = False
+        return {
+            "type": "command",
+            "m1": float(self._latest_command.get("m1", 0.0)) if armed else 0.0,
+            "m2": float(self._latest_command.get("m2", 0.0)) if armed else 0.0,
+            "m3": float(self._latest_command.get("m3", 0.0)) if armed else 0.0,
+            "m4": float(self._latest_command.get("m4", 0.0)) if armed else 0.0,
+            "arm": armed,
+            "stabilize_horizontal": bool(self._latest_command.get("stabilize_horizontal", False)),
+            "imu_home": imu_home,
+        }
+
+    @staticmethod
+    def _normalize_telemetry_payload(payload: dict) -> dict:
+        if not isinstance(payload, dict):
+            return payload
+
+        if "telemetry" in payload and isinstance(payload.get("telemetry"), dict):
+            return payload
+
+        legacy_sensor_keys = {
+            "battery",
+            "depth",
+            "pressure",
+            "temp_pi",
+            "temp_env",
+            "temp_enclosure",
+        }
+        if legacy_sensor_keys.intersection(payload.keys()):
+            telemetry = {
+                "battery_v": float(payload.get("battery", 0.0)),
+                "depth_m": float(payload.get("depth", 0.0)),
+                "pressure_bar": float(payload.get("pressure", 0.0)),
+                "pi_temp_c": float(payload.get("temp_pi", 0.0)),
+                "water_temp_c": float(payload.get("temp_env", 0.0)),
+                "enclosure_temp_c": float(payload.get("temp_enclosure", 0.0)),
+                "pitch_deg": float(payload.get("pitch_deg", 0.0)),
+                "roll_deg": float(payload.get("roll_deg", 0.0)),
+                "pitch_rate_dps": float(payload.get("pitch_rate_dps", 0.0)),
+                "roll_rate_dps": float(payload.get("roll_rate_dps", 0.0)),
+            }
+            return {"telemetry": telemetry}
+
+        return payload
+
+    def _resolve_cmd_target(self, force: bool = False) -> Optional[str]:
+        now = time.time()
+        if not force and self._resolved_cmd_host is not None and now < self._next_resolve_ts:
+            return self._resolved_cmd_host
+
+        hosts_to_try = []
+        if self.pi_host:
+            hosts_to_try.append(self.pi_host)
+        if self.fallback_host and self.fallback_host not in hosts_to_try:
+            hosts_to_try.append(self.fallback_host)
+        if self._resolved_cmd_host and self._resolved_cmd_host not in hosts_to_try:
+            hosts_to_try.append(self._resolved_cmd_host)
+
+        for host in hosts_to_try:
+            try:
+                info = socket.getaddrinfo(host, self.cmd_port, socket.AF_INET, socket.SOCK_DGRAM)
+                if info:
+                    resolved_ip = info[0][4][0]
+                    if resolved_ip != self._resolved_cmd_host:
+                        self.log_message.emit(f"Resolved motor target {host} -> {resolved_ip}")
+                    self._resolved_cmd_host = resolved_ip
+                    self._next_resolve_ts = now + 2.0
+                    self._resolve_error_logged = False
+                    return self._resolved_cmd_host
+            except socket.gaierror:
+                continue
+            except OSError:
+                continue
+
+        self._next_resolve_ts = now + 2.0
+        if not self._resolve_error_logged:
+            self.log_message.emit(
+                f"Unable to resolve motor target host (pi_host='{self.pi_host}', fallback='{self.fallback_host}')"
+            )
+            self._resolve_error_logged = True
+        return None
+
+    def send_json(self, payload: dict):
+        if not self._cmd_sock:
+            return
+        raw = json.dumps(payload).encode("utf-8")
+
+        target_ip = self._resolve_cmd_target()
+        if target_ip:
+            try:
+                self._cmd_sock.sendto(raw, (target_ip, self.cmd_port))
+                self._broadcast_fallback_logged = False
+                return
+            except socket.gaierror:
+                self._resolve_cmd_target(force=True)
+            except OSError as exc:
+                self.log_message.emit(f"Send error: {exc}")
+
+        # Last-resort fallback for Wi-Fi / mDNS cases where no IPv4 hostname resolution exists.
+        try:
+            self._cmd_sock.sendto(raw, (self._broadcast_cmd_ip, self.cmd_port))
+            if not self._broadcast_fallback_logged:
+                self.log_message.emit(
+                    f"No IPv4 host resolved; broadcasting motor commands to {self._broadcast_cmd_ip}:{self.cmd_port}"
+                )
+                self._broadcast_fallback_logged = True
+        except OSError as exc:
+            self.log_message.emit(f"Send error: {exc}")
+
+    def run(self):
+        # --- Command socket (send-only, never needs to bind) ---
+        try:
+            self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self._cmd_sock.setblocking(False)
+        except OSError as exc:
+            self.link_state.emit("UDP link failed")
+            self.log_message.emit(f"UDP command socket error: {exc}")
+            return
+
+        # --- Telemetry socket (receive-only, bind may fail gracefully) ---
+        telemetry_ok = False
+        try:
+            self._telemetry_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._telemetry_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._telemetry_sock.bind(("0.0.0.0", self.telemetry_port))
+            self._telemetry_sock.settimeout(0.1)
+            telemetry_ok = True
+        except OSError as exc:
+            self.log_message.emit(
+                f"Telemetry socket unavailable (sensor data disabled): {exc}"
+            )
+            if self._telemetry_sock is not None:
+                try:
+                    self._telemetry_sock.close()
+                except OSError:
+                    pass
+                self._telemetry_sock = None
+
+        self.link_state.emit("UDP link ready")
+        self.log_message.emit(
+            f"Sending commands to {self.pi_host}:{self.cmd_port}"
+            + (f" (fallback: {self.fallback_host})" if self.fallback_host else "")
+            + f" | Telemetry: {'listening on 0.0.0.0:' + str(self.telemetry_port) if telemetry_ok else 'DISABLED (port in use)'}"
+        )
+
+        last_command_tx = 0.0
+        while self._running:
+            now = time.time()
+            if now - last_command_tx >= 0.05:
+                self.send_json(self._build_motor_command_payload())
+                last_command_tx = now
+
+            if self._telemetry_sock is not None:
+                try:
+                    data, addr = self._telemetry_sock.recvfrom(8192)
+                    if self._resolved_cmd_host is None:
+                        self._resolved_cmd_host = addr[0]
+                        self.log_message.emit(f"Using telemetry source as motor target fallback: {addr[0]}")
+                    payload = json.loads(data.decode("utf-8"))
+                    if isinstance(payload, dict):
+                        self.telemetry_received.emit(self._normalize_telemetry_payload(payload))
+                except socket.timeout:
+                    pass
+                except BlockingIOError:
+                    pass
+                except json.JSONDecodeError as exc:
+                    self.log_message.emit(f"Telemetry JSON error: {exc}")
+                except OSError as exc:
+                    self.log_message.emit(f"Telemetry socket error: {exc}")
+                    try:
+                        self._telemetry_sock.close()
+                    except OSError:
+                        pass
+                    self._telemetry_sock = None
+            else:
+                # No telemetry socket — sleep to avoid busy-spinning
+                time.sleep(0.05)
+
+        for sock in (self._cmd_sock, self._telemetry_sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self.link_state.emit("UDP link stopped")
+
+
+class PiTempWorker(QThread):
+    temp_received = Signal(float)
+    log_message = Signal(str)
+
+    def __init__(self, pi_host: str, pi_user: str, pi_password: str, parent=None):
+        super().__init__(parent)
+        self.pi_host = pi_host
+        self.pi_user = pi_user
+        self.pi_password = pi_password
+        self._running = True
+        self._last_error: Optional[str] = None
+
+    def stop(self):
+        self._running = False
+
+    def _read_pi_temp_via_paramiko(self) -> float:
+        if paramiko is None or not self.pi_password:
+            raise RuntimeError("Paramiko unavailable or password not set")
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=self.pi_host,
+                username=self.pi_user,
+                password=self.pi_password,
+                timeout=4,
+                auth_timeout=4,
+                banner_timeout=4,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            stdin, stdout, stderr = client.exec_command(
+                "cat /sys/class/thermal/thermal_zone0/temp",
+                timeout=4,
+            )
+            _ = stdin
+            raw = stdout.read().decode("utf-8", errors="replace").strip()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            if err:
+                raise RuntimeError(err)
+            return float(raw) / 1000.0
+        finally:
+            client.close()
+
+    def run(self):
+        while self._running:
+            try:
+                temp_c = self._read_pi_temp_via_paramiko()
+                self.temp_received.emit(float(temp_c))
+                self._last_error = None
+            except Exception as exc:
+                msg = str(exc)
+                if msg != self._last_error:
+                    self.log_message.emit(f"Pi temp read failed: {msg}")
+                    self._last_error = msg
+            for _ in range(20):
+                if not self._running:
+                    break
+                time.sleep(0.1)
+
+
+# ============================================================
+# Reusable widgets
+# ============================================================
+class SectionBox(QGroupBox):
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent)
+        self.setStyleSheet(
+            """
+            QGroupBox {
+                font-size: 16px;
+                font-weight: 700;
+                border: 1px solid #606060;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }
+            """
+        )
+
+
+class TelemetryPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.labels = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        system = self._make_section(
+            "System",
+            [
+                ("timer_s", "Timer", self._format_timer),
+                ("pi_temp_c", "Pi Temp", lambda v: f"{v:.1f} C"),
+                ("stabilization_enabled", "Stabilization", lambda v: "ON" if bool(v) else "OFF"),
+                ("esc_overtemp_active", "ESC Overtemp", lambda v: "ACTIVE" if bool(v) else "OK"),
+                ("current_a", "Current", lambda v: f"{v:.2f} A"),
+                ("current_adc_v", "Current ADC", lambda v: f"{v:.3f} V"),
+            ],
+        )
+        environment = self._make_section(
+            "Environment",
+            [
+                ("pressure_bar", "Pressure", lambda v: f"{v:.2f}"),
+                ("water_temp_c", "Water Temp", lambda v: f"{v:.1f} C"),
+                ("esc_temp_1_c", "ESC Temp 1", lambda v: f"{v:.1f} C"),
+                ("esc_temp_2_c", "ESC Temp 2", lambda v: f"{v:.1f} C"),
+            ],
+        )
+        motion = self._make_section(
+            "Motion",
+            [
+                ("pitch_deg", "Pitch", lambda v: f"{v:.2f} deg"),
+                ("roll_deg", "Roll", lambda v: f"{v:.2f} deg"),
+                ("pitch_rate_dps", "Pitch Rate", lambda v: f"{v:.2f} deg/s"),
+                ("roll_rate_dps", "Roll Rate", lambda v: f"{v:.2f} deg/s"),
+            ],
+        )
+        thrusters = self._make_thruster_section()
+
+        self.arm_label = QLabel("DISARMED")
+        self.arm_label.setAlignment(Qt.AlignCenter)
+        self.arm_label.setMinimumHeight(54)
+        self.arm_label.setStyleSheet(self._arm_style(False))
+
+        root.addWidget(system)
+        root.addWidget(environment)
+        root.addWidget(motion)
+        root.addWidget(thrusters)
+        root.addWidget(self.arm_label)
+        root.addStretch(1)
+
+        self.update_telemetry(TelemetryData())
+
+    def _make_section(self, title, rows):
+        box = SectionBox(title)
+        layout = QFormLayout(box)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        for key, label, formatter in rows:
+            value_label = QLabel("0")
+            value_label.setStyleSheet("font-size: 14px;")
+            value_label.setProperty("formatter", formatter)
+            self.labels[key] = value_label
+            layout.addRow(f"{label}:", value_label)
+        return box
+
+    def _make_thruster_section(self):
+        box = SectionBox("Thruster Command")
+        layout = QGridLayout(box)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(10)
+
+        for key, row, col in (("m1", 0, 0), ("m2", 0, 1), ("m3", 1, 0), ("m4", 1, 1)):
+            value_label = QLabel(f"{key.upper()} 0")
+            value_label.setAlignment(Qt.AlignCenter)
+            value_label.setMinimumHeight(32)
+            value_label.setStyleSheet("font-size: 14px; font-weight: 700; border: 1px solid #5a5a5a; border-radius: 6px;")
+            value_label.setProperty("formatter", lambda v, motor=key.upper(): f"{motor} {int(v)}")
+            self.labels[key] = value_label
+            layout.addWidget(value_label, row, col)
+
+        return box
+
+    @staticmethod
+    def _format_timer(seconds: float) -> str:
+        total = max(0, int(seconds))
+        mins = total // 60
+        secs = total % 60
+        return f"{mins:02d}:{secs:02d}"
+
+    @staticmethod
+    def _arm_style(armed: bool) -> str:
+        if armed:
+            return (
+                "background-color: #14ff14; color: black; font-size: 24px; "
+                "font-weight: 800; border-radius: 8px;"
+            )
+        return (
+            "background-color: #5a0000; color: white; font-size: 24px; "
+            "font-weight: 800; border-radius: 8px;"
+        )
+
+    def update_telemetry(self, telemetry: TelemetryData):
+        data = asdict(telemetry)
+        for key, label in self.labels.items():
+            formatter = label.property("formatter")
+            label.setText(formatter(data.get(key, 0)))
+
+        if "esc_overtemp_active" in self.labels:
+            self.labels["esc_overtemp_active"].setStyleSheet(
+                "font-size: 14px; font-weight: 700; color: #ff4040;"
+                if bool(telemetry.esc_overtemp_active)
+                else "font-size: 14px; font-weight: 700; color: #20d070;"
+            )
+
+        self.arm_label.setText("ARMED" if telemetry.armed else "DISARMED")
+        self.arm_label.setStyleSheet(self._arm_style(telemetry.armed))
+
+
+class LogTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        self.text = QTextEdit()
+        self.text.setReadOnly(True)
+        layout.addWidget(self.text)
+
+    @Slot(str)
+    def append_log(self, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        self.text.append(f"[{timestamp}] {message}")
+
+
+# ============================================================
+# Main window
+# ============================================================
+class MainWindow(QMainWindow):
+    frame_presented = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("AnglerFish Control Station")
+        self.resize(1400, 850)
+
+        self.telemetry = TelemetryData()
+        self.video_worker: Optional[VideoWorker] = None
+        self.udp_worker: Optional[UdpLinkWorker] = None
+        self.pi_temp_worker: Optional[PiTempWorker] = None
+        self.link_ready = False
+        self.controller_device = None
+        self.controller_active = False
+        self.controller_armed = False
+        self.controller_a_last_press_time = 0.0
+        self.controller_x_last_press_time = 0.0
+        self.controller_y_last_press_time = 0.0
+        self.controller_missing_logged = False
+        self.controller_deadzone = 0.08
+        self.trigger_scale = 1.0
+        self.yaw_scale = 1.0
+        self.strafe_scale = 1.0
+        self.vertical_scale = 1.0
+        self.horizontal_stabilization_enabled = False
+        self.horizontal_stabilization_resume_after_manual = False
+        self._last_presented_ts: Optional[float] = None
+        self._presented_fps_ema = 0.0
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
+
+        # Left: video and connection
+        left = QVBoxLayout()
+        left.setSpacing(10)
+
+        self.connection_box = SectionBox("Connection")
+        connection_layout = QGridLayout(self.connection_box)
+        self.pi_username_edit = QLineEdit("pi")
+        self.pi_password_edit = QLineEdit("")
+        self.pi_password_edit.setEchoMode(QLineEdit.Password)
+        self.pi_password_edit.setPlaceholderText("SSH password (required for updates)")
+        self.show_password_check = QCheckBox("Show Password")
+        self.remember_password_check = QCheckBox("Remember Password")
+        self.pi_hostname_edit = QLineEdit("192.168.50.107")
+        self.rtsp_path_edit = QLineEdit("rtp://0.0.0.0:5600")
+
+        self.connect_btn = QPushButton("Connect")
+        self.disconnect_btn = QPushButton("Disconnect")
+        self.disconnect_btn.setEnabled(False)
+        self.arm_btn = QPushButton("Arm")
+        self.disarm_btn = QPushButton("Disarm")
+
+        connection_layout.addWidget(QLabel("Pi Username"), 0, 0)
+        connection_layout.addWidget(self.pi_username_edit, 0, 1)
+        connection_layout.addWidget(QLabel("Pi IP"), 0, 2)
+        connection_layout.addWidget(self.pi_hostname_edit, 0, 3)
+        connection_layout.addWidget(QLabel("Pi Password"), 1, 0)
+        connection_layout.addWidget(self.pi_password_edit, 1, 1, 1, 2)
+        connection_layout.addWidget(self.show_password_check, 1, 3)
+        connection_layout.addWidget(self.remember_password_check, 2, 0, 1, 2)
+        connection_layout.addWidget(QLabel("Video Source"), 3, 0)
+        connection_layout.addWidget(self.rtsp_path_edit, 3, 1, 1, 3)
+        connection_layout.addWidget(self.connect_btn, 4, 0)
+
+        self.disconnect_only_widget = QWidget()
+        disconnect_only_layout = QHBoxLayout(self.disconnect_only_widget)
+        disconnect_only_layout.setContentsMargins(0, 0, 0, 0)
+        disconnect_only_layout.addStretch(1)
+        disconnect_only_layout.addWidget(self.disconnect_btn)
+        disconnect_only_layout.addStretch(1)
+        self.disconnect_only_widget.setVisible(False)
+
+        self.video_label = QLabel("Video not connected")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setMinimumSize(800, 450)
+        self.video_label.setStyleSheet(
+            "background-color: black; color: #d0d0d0; border: 1px solid #505050; border-radius: 8px;"
+        )
+        self.video_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.overlay_depth = QLabel(self.video_label)
+        self.overlay_enclosure_temp = QLabel(self.video_label)
+        self.overlay_battery = QLabel(self.video_label)
+        for overlay in (
+            self.overlay_depth,
+            self.overlay_enclosure_temp,
+            self.overlay_battery,
+        ):
+            overlay.setAlignment(Qt.AlignCenter)
+            overlay.setStyleSheet(
+                "background: transparent; color: white; font-size: 13px; font-weight: 700;"
+            )
+            overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            overlay.show()
+
+        left.addWidget(self.connection_box)
+        left.addWidget(self.disconnect_only_widget)
+        left.addWidget(self.video_label, stretch=1)
+
+        # Right: tabs + telemetry panel
+        right = QVBoxLayout()
+        right.setSpacing(10)
+
+        self.tabs = QTabWidget()
+        self.telemetry_tab = QWidget()
+        telemetry_tab_layout = QVBoxLayout(self.telemetry_tab)
+        self.telemetry_panel = TelemetryPanel()
+        arm_controls_layout = QHBoxLayout()
+        arm_controls_layout.addWidget(self.arm_btn)
+        arm_controls_layout.addWidget(self.disarm_btn)
+        arm_controls_layout.addStretch(1)
+        telemetry_tab_layout.addWidget(self.telemetry_panel)
+        telemetry_tab_layout.addLayout(arm_controls_layout)
+
+        self.log_tab = LogTab()
+
+        self.tabs.addTab(self.telemetry_tab, "Telemetry")
+        self.tabs.addTab(self.log_tab, "Log")
+
+        right.addWidget(self.tabs)
+
+        root.addLayout(left, stretch=4)
+        root.addLayout(right, stretch=1)
+
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.video_status = QLabel("Video: idle")
+        self.link_status = QLabel("UDP: idle")
+        self.status_bar.addPermanentWidget(self.video_status)
+        self.status_bar.addPermanentWidget(self.link_status)
+
+        self._build_menu()
+        self._connect_signals()
+        self._load_connection_history()
+        self._update_arm_buttons()
+        self._update_video_overlay()
+
+        self.connection_timer = QTimer(self)
+        self.connection_timer.setInterval(200)
+        self.connection_timer.timeout.connect(self._connection_timer_tick)
+        self._link_start_time: Optional[float] = None
+
+        self.controller_timer = QTimer(self)
+        self.controller_timer.setInterval(33)
+        self.controller_timer.timeout.connect(self._controller_poll_tick)
+        self._start_controller_polling()
+
+        self._apply_dark_theme()
+
+    @Slot(str)
+    def update_rtsp_url_from_host(self, host: str):
+        host = host.strip()
+        current_source = self.rtsp_path_edit.text().strip()
+        if host and current_source.lower().startswith("rtsp://"):
+            self.rtsp_path_edit.setText(f"rtsp://{host}:8554/cam")
+
+    def _build_menu(self):
+        file_menu = self.menuBar().addMenu("File")
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        tools_menu = self.menuBar().addMenu("Tools")
+        update_action = QAction("Update Resources", self)
+        update_action.triggered.connect(self.deploy_pi_folder)
+        tools_menu.addAction(update_action)
+
+        upload_action = QAction("Upload rescources", self)
+        upload_action.triggered.connect(self.upload_pi_folder)
+        tools_menu.addAction(upload_action)
+
+        create_sub_action = QAction("Create Sub", self)
+        create_sub_action.triggered.connect(self.create_sub)
+        tools_menu.addAction(create_sub_action)
+
+    def _connect_signals(self):
+        self.connect_btn.clicked.connect(self.start_links)
+        self.disconnect_btn.clicked.connect(self.stop_links)
+        self.arm_btn.clicked.connect(lambda: self.send_arm_state(True))
+        self.disarm_btn.clicked.connect(lambda: self.send_arm_state(False))
+        self.pi_hostname_edit.textChanged.connect(self.update_rtsp_url_from_host)
+        self.show_password_check.toggled.connect(self.on_show_password_toggled)
+        self.remember_password_check.toggled.connect(self.on_remember_password_toggled)
+
+    @Slot(bool)
+    def on_show_password_toggled(self, checked: bool):
+        self.pi_password_edit.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+
+    @Slot(bool)
+    def on_remember_password_toggled(self, checked: bool):
+        if not checked:
+            settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+            settings.remove("connection/pi_password")
+            settings.sync()
+        self._save_connection_history()
+
+    def _load_connection_history(self):
+        settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+        saved_host = str(settings.value("connection/pi_host", "") or "").strip()
+        remember_password = str(settings.value("connection/remember_password", "0") or "0") == "1"
+        saved_password = str(settings.value("connection/pi_password", "") or "")
+
+        if saved_host:
+            self.pi_hostname_edit.setText(saved_host)
+        self.remember_password_check.setChecked(remember_password)
+        if remember_password and saved_password:
+            self.pi_password_edit.setText(saved_password)
+
+    def _save_connection_history(self):
+        settings = QSettings("Project-Angler-Fish", "AnglerfishControlStation")
+        settings.setValue("connection/pi_host", self.pi_hostname_edit.text().strip())
+        remember_password = self.remember_password_check.isChecked()
+        settings.setValue("connection/remember_password", "1" if remember_password else "0")
+        if remember_password:
+            settings.setValue("connection/pi_password", self.pi_password_edit.text())
+        else:
+            settings.remove("connection/pi_password")
+        settings.sync()
+
+    def _build_pi_dir_candidates(self) -> list[Path]:
+        candidates: list[Path] = []
+
+        def _add_base_paths(base: Path):
+            base = base.resolve()
+            candidates.append(base / "PI")
+            candidates.append(base / "Controller3" / "PI")
+            for parent in list(base.parents)[:3]:
+                candidates.append(parent / "PI")
+                candidates.append(parent / "Controller3" / "PI")
+
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                _add_base_paths(Path(meipass))
+            _add_base_paths(Path(sys.executable).resolve().parent)
+
+        _add_base_paths(Path(__file__).resolve().parent)
+        _add_base_paths(Path.cwd())
+
+        seen: set[Path] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            unique.append(candidate)
+        return unique
+
+    def _resolve_local_pi_dir(self) -> Path:
+        candidates = self._build_pi_dir_candidates()
+        self._last_pi_dir_candidates = [str(path) for path in candidates]
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+
+        return candidates[0] if candidates else (Path(__file__).resolve().parent / "PI")
+
+    def _local_pi_dir_not_found_message(self, local_dir: Path) -> str:
+        looked_in = getattr(self, "_last_pi_dir_candidates", [])
+        looked_block = "\n".join(looked_in[:12]) if looked_in else str(local_dir)
+        return (
+            f"Local folder not found:\n{local_dir}\n\n"
+            "Looked in:\n"
+            f"{looked_block}\n\n"
+            "For PyInstaller builds, include the PI folder with add-data, for example:\n"
+            "--add-data \"Controller3/PI;PI\""
+        )
+
+    @staticmethod
+    def _clamp(value: float, minimum: float, maximum: float) -> float:
+        return max(minimum, min(maximum, value))
+
+    def _apply_deadzone(self, value: float, deadzone: float) -> float:
+        if abs(value) < deadzone:
+            return 0.0
+        return value
+
+    def _try_initialize_controller(self) -> bool:
+        if self.controller_active and self.controller_device is not None:
+            return True
+
+        if pygame is None or xbox360_controller is None:
+            self.log_tab.append_log("Controller disabled: install pygame and ensure xbox360_controller.py is present")
+            return False
+
+        try:
+            if not pygame.get_init():
+                pygame.init()
+            if not pygame.joystick.get_init():
+                pygame.joystick.init()
+
+            if pygame.joystick.get_count() == 0:
+                if not self.controller_missing_logged:
+                    self.log_tab.append_log("No Xbox controller detected")
+                    self.controller_missing_logged = True
+                return False
+
+            self.controller_device = xbox360_controller.Controller(dead_zone=self.controller_deadzone)
+            self.controller_active = True
+            self.controller_missing_logged = False
+            self.log_tab.append_log("Xbox controller connected")
+            return True
+        except Exception as exc:
+            self.controller_device = None
+            self.controller_active = False
+            self.log_tab.append_log(f"Controller init failed: {exc}")
+            return False
+
+    def _start_controller_polling(self):
+        self._try_initialize_controller()  # best-effort; _controller_poll_tick retries each tick
+        self.controller_timer.start()
+
+    def _stop_controller_polling(self):
+        self.controller_timer.stop()
+        self.controller_device = None
+        self.controller_active = False
+
+    @Slot()
+    def _controller_poll_tick(self):
+        if not self._try_initialize_controller():
+            return
+
+        imu_home_requested = False
+
+        try:
+            pygame.event.pump()
+            buttons = self.controller_device.get_buttons()
+            rt_x, _rt_y = self.controller_device.get_left_stick()
+            lt_x, lt_y = self.controller_device.get_right_stick()
+            triggers = self.controller_device.get_triggers()
+            pad_up, pad_right, pad_down, pad_left = self.controller_device.get_pad()
+        except Exception as exc:
+            self.log_tab.append_log(f"Controller read failed: {exc}")
+            self._stop_controller_polling()
+            return
+
+        if hasattr(xbox360_controller, "A") and xbox360_controller.A < len(buttons):
+            if buttons[xbox360_controller.A]:
+                now = time.time()
+                if now - self.controller_a_last_press_time > 0.5:
+                    self.controller_armed = not self.controller_armed
+                    self.controller_a_last_press_time = now
+                    self.log_tab.append_log("Controller ARMED" if self.controller_armed else "Controller DISARMED")
+
+        if hasattr(xbox360_controller, "X") and xbox360_controller.X < len(buttons):
+            if buttons[xbox360_controller.X]:
+                now = time.time()
+                if now - self.controller_x_last_press_time > 0.5:
+                    self.horizontal_stabilization_enabled = not self.horizontal_stabilization_enabled
+                    self.horizontal_stabilization_resume_after_manual = False
+                    self.controller_x_last_press_time = now
+                    state_text = "ENABLED" if self.horizontal_stabilization_enabled else "DISABLED"
+                    self.log_tab.append_log(f"Horizontal stabilization {state_text}")
+
+        if hasattr(xbox360_controller, "Y") and xbox360_controller.Y < len(buttons):
+            if buttons[xbox360_controller.Y]:
+                now = time.time()
+                if now - self.controller_y_last_press_time > 0.5:
+                    self.controller_y_last_press_time = now
+                    imu_home_requested = True
+                    self.log_tab.append_log("IMU home requested")
+
+        deadzone = self.controller_deadzone
+        trigger_scale = self.trigger_scale
+        yaw_scale = self.yaw_scale
+        strafe_scale = self.strafe_scale
+        vertical_scale = self.vertical_scale
+
+        lt_x = self._clamp(self._apply_deadzone(float(lt_x), deadzone) * strafe_scale, -1.0, 1.0)
+        lt_y = self._clamp(self._apply_deadzone(float(lt_y), deadzone) * vertical_scale, -1.0, 1.0)
+        rt_x = self._clamp(self._apply_deadzone(float(rt_x), deadzone) * yaw_scale, -1.0, 1.0)
+        triggers = self._clamp(self._apply_deadzone(float(triggers), deadzone) * trigger_scale, -1.0, 1.0)
+
+        manual_pitch_input = abs(lt_y) > 0.05 or pad_up > 0 or pad_down > 0
+        manual_roll_input = abs(lt_x) > 0.05
+        if self.horizontal_stabilization_enabled and (manual_pitch_input or manual_roll_input):
+            self.horizontal_stabilization_enabled = False
+            self.horizontal_stabilization_resume_after_manual = True
+            self.log_tab.append_log("Horizontal stabilization DISABLED by manual pitch/roll input")
+        elif (
+            self.horizontal_stabilization_resume_after_manual
+            and not manual_pitch_input
+            and not manual_roll_input
+        ):
+            self.horizontal_stabilization_enabled = True
+            self.horizontal_stabilization_resume_after_manual = False
+            self.log_tab.append_log("Horizontal stabilization RE-ENABLED after manual input")
+
+        yaw_flag = False
+        pitch_flag = False
+        m1 = m2 = m3 = m4 = 0.0
+
+        if abs(triggers) > 0.05:
+            m1 = triggers
+            m2 = triggers
+            yaw_flag = True
+
+        yaw_step = self._clamp(0.3 * yaw_scale, 0.0, 1.0)
+        if not yaw_flag:
+            if abs(rt_x) > 0.05:
+                m2 = rt_x
+                m1 = -m2
+            elif pad_left > 0:
+                m2 = yaw_step
+                m1 = -m2
+            elif pad_right > 0:
+                m2 = -yaw_step
+                m1 = -m2
+
+        pitch_step = self._clamp(0.3 * vertical_scale, 0.0, 1.0)
+        if abs(lt_y) > 0.05:
+            m3 = -lt_y
+            m4 = m3
+            pitch_flag = True
+        elif pad_up > 0:
+            m3 = pitch_step
+            m4 = m3
+            pitch_flag = True
+        elif pad_down > 0:
+            m3 = -pitch_step
+            m4 = m3
+            pitch_flag = True
+
+        if not pitch_flag and abs(lt_x) > 0.05:
+            m4 = lt_x
+            m3 = -m4
+
+        if not self.controller_armed:
+            m1 = m2 = m3 = m4 = 0.0
+
+        payload = {
+            "m1": self._clamp(m1 * 100.0, -100.0, 100.0),
+            "m2": self._clamp(m2 * 100.0, -100.0, 100.0),
+            "m3": self._clamp(m3 * 100.0, -100.0, 100.0),
+            "m4": self._clamp(m4 * 100.0, -100.0, 100.0),
+            "arm": self.controller_armed,
+            "stabilize_horizontal": self.horizontal_stabilization_enabled,
+            "imu_home": imu_home_requested,
+        }
+        if self.udp_worker is not None:
+            self.udp_worker.update_command(payload)
+
+        # GUI display mapping: physical M1/M2 correspond to command m3/m4, and M3/M4 to m1/m2.
+        self.telemetry.m1 = int(payload["m3"])
+        self.telemetry.m2 = int(payload["m4"])
+        self.telemetry.m3 = int(payload["m1"])
+        self.telemetry.m4 = int(payload["m2"])
+        self.telemetry.armed = self.controller_armed
+        self.telemetry.stabilization_enabled = self.horizontal_stabilization_enabled
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_arm_buttons()
+        self._update_video_overlay()
+
+    def _update_arm_buttons(self):
+        self.arm_btn.setEnabled(self.link_ready and not self.telemetry.armed)
+        self.disarm_btn.setEnabled(self.link_ready and self.telemetry.armed)
+
+    def _update_video_overlay(self):
+        self.overlay_depth.setText(f"Depth: {self.telemetry.depth_m:.2f} m")
+        self.overlay_enclosure_temp.setText(
+            f"Enclosure Temp: {self.telemetry.enclosure_temp_c:.1f} C"
+        )
+        self.overlay_battery.setText(f"Battery: {self.telemetry.battery_v:.2f} V")
+
+        for overlay in (
+            self.overlay_depth,
+            self.overlay_enclosure_temp,
+            self.overlay_battery,
+        ):
+            overlay.adjustSize()
+
+        self._position_video_overlays()
+
+    def _position_video_overlays(self):
+        margin = 12
+        label_width = self.video_label.width()
+        label_height = self.video_label.height()
+
+        pixmap = self.video_label.pixmap()
+        if pixmap is not None and not pixmap.isNull():
+            video_width = pixmap.width()
+            video_height = pixmap.height()
+            video_x = max(0, (label_width - video_width) // 2)
+            video_y = max(0, (label_height - video_height) // 2)
+        else:
+            video_width = label_width
+            video_height = label_height
+            video_x = 0
+            video_y = 0
+
+        depth_width = self.overlay_depth.width()
+        depth_height = self.overlay_depth.height()
+        enclosure_width = self.overlay_enclosure_temp.width()
+        enclosure_height = self.overlay_enclosure_temp.height()
+        battery_width = self.overlay_battery.width()
+        battery_height = self.overlay_battery.height()
+
+        self.overlay_depth.move(video_x + margin, video_y + margin)
+        self.overlay_enclosure_temp.move(
+            video_x + max(margin, (video_width - enclosure_width) // 2),
+            video_y + margin,
+        )
+        self.overlay_battery.move(
+            video_x + max(margin, video_width - battery_width - margin),
+            video_y + margin,
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_video_overlays()
+
+    def _apply_dark_theme(self):
+        self.setStyleSheet(
+            """
+            QWidget { background-color: #151515; color: #f0f0f0; font-size: 14px; }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QTabWidget::pane {
+                background-color: #202020;
+                border: 1px solid #4c4c4c;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QPushButton {
+                background-color: #2b2b2b;
+                border: 1px solid #5a5a5a;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #383838; }
+            QPushButton:disabled { color: #888888; }
+            QTabBar::tab {
+                background-color: #222222;
+                padding: 8px 14px;
+                border: 1px solid #4a4a4a;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected { background-color: #343434; }
+            """
+        )
+
+    @Slot()
+    def start_links(self):
+        self.stop_links()
+
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_password = self._get_ssh_password()
+        rtsp_url = self.rtsp_path_edit.text().strip()
+        rtsp_host = (urlparse(rtsp_url).hostname or "").strip() if (urlparse(rtsp_url).scheme or "").lower() == "rtsp" else ""
+        cmd_port = 9000
+        telemetry_port = 9001
+
+        self._save_connection_history()
+
+        self.video_worker = VideoWorker(rtsp_url)
+        self.video_worker.frame_ready.connect(self.on_video_frame)
+        self.video_worker.stats_ready.connect(self.on_video_stats)
+        self.video_worker.status_changed.connect(self.on_video_status)
+        self.frame_presented.connect(self.video_worker.mark_frame_presented)
+        self.video_worker.start()
+
+        self.udp_worker = UdpLinkWorker(pi_host, cmd_port, telemetry_port, fallback_host=rtsp_host)
+        self.udp_worker.telemetry_received.connect(self.on_telemetry_packet)
+        self.udp_worker.log_message.connect(self.log_tab.append_log)
+        self.udp_worker.link_state.connect(self.on_link_status)
+        self.udp_worker.start()
+
+        self.pi_temp_worker = PiTempWorker(pi_host=pi_host, pi_user=pi_user, pi_password=pi_password)
+        self.pi_temp_worker.temp_received.connect(self.on_pi_temp_update)
+        self.pi_temp_worker.log_message.connect(self.log_tab.append_log)
+        self.pi_temp_worker.start()
+
+        self.connect_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(True)
+        self.connection_box.setVisible(False)
+        self.disconnect_only_widget.setVisible(True)
+        self.link_ready = False
+        self._link_start_time = None
+        self.connection_timer.stop()
+        self.telemetry.timer_s = 0.0
+        self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self.status_bar.showMessage("Connecting to Pi...", 3000)
+        self.log_tab.append_log("Connection started")
+        self._update_video_overlay()
+
+    @Slot()
+    def stop_links(self):
+        if self.video_worker is not None:
+            self.video_worker.stop()
+            self.video_worker.wait(1500)
+            self.video_worker = None
+
+        if self.udp_worker is not None:
+            self.udp_worker.stop()
+            self.udp_worker.wait(1500)
+            self.udp_worker = None
+
+        if self.pi_temp_worker is not None:
+            self.pi_temp_worker.stop()
+            self.pi_temp_worker.wait(1500)
+            self.pi_temp_worker = None
+
+        self.connect_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(False)
+        self.connection_box.setVisible(True)
+        self.disconnect_only_widget.setVisible(False)
+        self.link_ready = False
+        self.connection_timer.stop()
+        self._link_start_time = None
+        self.controller_armed = False
+        self.horizontal_stabilization_enabled = False
+        self.horizontal_stabilization_resume_after_manual = False
+        self.telemetry.armed = False
+        self.telemetry.stabilization_enabled = False
+        self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self.video_status.setText("Video: idle")
+        self.link_status.setText("UDP: idle")
+        self.video_label.setText("Video not connected")
+        self.video_label.setPixmap(QPixmap())
+        self._update_video_overlay()
+
+    @Slot(QImage)
+    def on_video_frame(self, image: QImage):
+        now = time.monotonic()
+        if self._last_presented_ts is None:
+            self._presented_fps_ema = 0.0
+        else:
+            dt = now - self._last_presented_ts
+            if 0.001 <= dt <= 2.0:
+                fps_instant = 1.0 / dt
+                if self._presented_fps_ema <= 0.0:
+                    self._presented_fps_ema = fps_instant
+                else:
+                    alpha = 0.15
+                    self._presented_fps_ema = (
+                        alpha * fps_instant
+                    ) + ((1.0 - alpha) * self._presented_fps_ema)
+                self.telemetry.video_fps = max(0.0, min(120.0, self._presented_fps_ema))
+        self._last_presented_ts = now
+
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(
+            self.video_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.video_label.setPixmap(scaled)
+        self._position_video_overlays()
+        self.frame_presented.emit()
+
+    @Slot(dict)
+    def on_video_stats(self, stats: dict):
+        _ = stats
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
+
+    @Slot(str)
+    def on_video_status(self, text: str):
+        self.video_status.setText(f"Video: {text}")
+        self.log_tab.append_log(text)
+
+    @Slot(str)
+    def on_link_status(self, text: str):
+        self.link_status.setText(f"UDP: {text}")
+        if text == "UDP link ready":
+            self.link_ready = True
+            self._link_start_time = time.monotonic()
+            self.telemetry.timer_s = 0.0
+            self.connection_timer.start()
+        elif text in ("UDP link failed", "UDP link stopped"):
+            self.link_ready = False
+            self.connection_timer.stop()
+            self._link_start_time = None
+        self._update_arm_buttons()
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
+        self.log_tab.append_log(text)
+
+    @Slot()
+    def _connection_timer_tick(self):
+        if self._link_start_time is None:
+            return
+        self.telemetry.timer_s = max(0.0, time.monotonic() - self._link_start_time)
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
+
+    @Slot(dict)
+    def on_telemetry_packet(self, payload: dict):
+        data = payload.get("telemetry", payload)
+        prev_overtemp_state = bool(self.telemetry.esc_overtemp_active)
+        for key in asdict(self.telemetry).keys():
+            if key in data:
+                setattr(self.telemetry, key, data[key])
+        new_overtemp_state = bool(self.telemetry.esc_overtemp_active)
+        if new_overtemp_state != prev_overtemp_state:
+            if new_overtemp_state:
+                self.log_tab.append_log("ESC overtemp ACTIVE: motor movement blocked on Pi")
+            else:
+                self.log_tab.append_log("ESC overtemp CLEARED: motor movement restored")
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_arm_buttons()
+        self._update_video_overlay()
+
+    @Slot(float)
+    def on_pi_temp_update(self, temp_c: float):
+        self.telemetry.pi_temp_c = float(temp_c)
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_video_overlay()
+
+    def send_arm_state(self, armed: bool):
+        self.controller_armed = armed
+        if not armed:
+            self.horizontal_stabilization_resume_after_manual = False
+        self.telemetry.armed = armed
+        self.telemetry.stabilization_enabled = self.horizontal_stabilization_enabled
+        self.telemetry_panel.update_telemetry(self.telemetry)
+        self._update_arm_buttons()
+        self._update_video_overlay()
+        if self.udp_worker is not None:
+            self.udp_worker.update_command(
+                {
+                    "arm": armed,
+                    "stabilize_horizontal": self.horizontal_stabilization_enabled,
+                    "imu_home": False,
+                }
+            )
+        self.log_tab.append_log("ARM command sent" if armed else "DISARM command sent")
+
+    @Slot()
+    def create_sub(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_dir = "/home/pi/anglerfish"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
+
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Create Sub Failed",
+                self._local_pi_dir_not_found_message(local_dir),
+            )
+            return
+
+        if not pi_host:
+            QMessageBox.warning(self, "Create Sub Failed", "Pi IP is empty.")
+            return
+
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Create Sub Failed",
+                "Pi Password is required before creating the sub.",
+            )
+            return
+
+        confirmation = QMessageBox.question(
+            self,
+            "Create Sub",
+            (
+                f"Create sub on:\n{pi_user}@{pi_host}\n\n"
+                "This will:\n"
+                "1. Upload PI files\n"
+                "2. Run sudo install_anglerfish_dependencies.sh\n"
+                "3. Run sudo install_anglerfish_services.sh\n"
+                "4. Reboot the Pi\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Creating sub on Pi...")
+        self.log_tab.append_log("Create Sub started")
+
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed during upload: {message}")
+            QMessageBox.critical(
+                self,
+                "Create Sub Failed",
+                f"Could not upload PI files.\n\nReason:\n{message}",
+            )
+            return
+        self.log_tab.append_log("Create Sub: upload complete")
+
+        deps_cmd = "sudo /home/pi/anglerfish/install_anglerfish_dependencies.sh"
+        ok, output = self._run_ssh_command(pi_user, pi_host, deps_cmd)
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed at dependencies install: {output}")
+            QMessageBox.critical(
+                self,
+                "Create Sub Failed",
+                "Upload succeeded, but dependency install failed.\n\n"
+                f"Reason:\n{output}",
+            )
+            return
+        self.log_tab.append_log("Create Sub: dependencies installed")
+
+        services_cmd = "sudo /home/pi/anglerfish/install_anglerfish_services.sh"
+        ok, output = self._run_ssh_command(pi_user, pi_host, services_cmd)
+        if not ok:
+            self.status_bar.showMessage("Create Sub failed", 8000)
+            self.log_tab.append_log(f"Create Sub failed at services install: {output}")
+            QMessageBox.critical(
+                self,
+                "Create Sub Failed",
+                "Upload and dependency install succeeded, but service install failed.\n\n"
+                f"Reason:\n{output}",
+            )
+            return
+        self.log_tab.append_log("Create Sub: services installed")
+
+        reboot_ok, reboot_message = self._reboot_pi(pi_user, pi_host)
+        if not reboot_ok:
+            self.status_bar.showMessage("Create Sub completed with reboot failure", 9000)
+            self.log_tab.append_log(f"Create Sub reboot failed: {reboot_message}")
+            QMessageBox.warning(
+                self,
+                "Create Sub Complete (Reboot Failed)",
+                "Sub creation steps completed, but reboot failed.\n\n"
+                f"Reason:\n{reboot_message}",
+            )
+            return
+
+        self.status_bar.showMessage("Create Sub completed", 6000)
+        self.log_tab.append_log("Create Sub completed; reboot command sent")
+        QMessageBox.information(
+            self,
+            "Create Sub Complete",
+            "PI files uploaded, dependencies/services installed, and reboot command sent.",
+        )
+
+    @Slot()
+    def upload_pi_folder(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_dir = "/home/pi/anglerfish"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
+
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Upload Failed",
+                self._local_pi_dir_not_found_message(local_dir),
+            )
+            return
+
+        if not pi_host:
+            QMessageBox.warning(self, "Upload Failed", "Pi IP is empty.")
+            return
+
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Upload Failed",
+                "Pi Password is required before uploading files.",
+            )
+            return
+
+        method_note = (
+            "Files will be copied directly over the local SSH link. "
+            "Paramiko SFTP is used when available; otherwise the app falls back to SSH/SCP."
+        )
+
+        confirmation = QMessageBox.question(
+            self,
+            "Upload to Pi",
+            (
+                f"Upload local PI folder to:\n{pi_user}@{pi_host}:{remote_dir}\n\n"
+                f"{method_note}\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Uploading resources to Pi...")
+        self.log_tab.append_log(
+            f"Upload started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
+        )
+
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
+
+        if ok:
+            self.status_bar.showMessage("Upload completed", 5000)
+            self.log_tab.append_log("Upload completed successfully")
+            QMessageBox.information(
+                self,
+                "Upload Complete",
+                "PI files were uploaded successfully.",
+            )
+            return
+
+        self.status_bar.showMessage("Upload failed", 8000)
+        self.log_tab.append_log(f"Upload failed: {message}")
+        tip = "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
+        QMessageBox.critical(
+            self,
+            "Upload Failed",
+            f"Could not upload files.\n\nReason:\n{message}\n\n{tip}",
+        )
+
+    @Slot()
+    def deploy_pi_folder(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_dir = "/home/pi/anglerfish"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+        pi_password = self._get_ssh_password()
+
+        self._save_connection_history()
+
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Deploy Failed",
+                self._local_pi_dir_not_found_message(local_dir),
+            )
+            return
+
+        if not pi_host:
+            QMessageBox.warning(self, "Deploy Failed", "Pi IP is empty.")
+            return
+
+        if not pi_password:
+            QMessageBox.warning(
+                self,
+                "Deploy Failed",
+                "Pi Password is required before updating files.",
+            )
+            return
+
+        method_note = (
+            "Files will be copied directly over the local SSH link. "
+            "Paramiko SFTP is used when available; otherwise the app falls back to SSH/SCP."
+        )
+
+        confirmation = QMessageBox.question(
+            self,
+            "Deploy to Pi",
+            (
+                f"Deploy local PI folder to:\n{pi_user}@{pi_host}:{remote_dir}\n\n"
+                f"{method_note}\n\nContinue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Updating resources on Pi...")
+        self.log_tab.append_log(
+            f"Update started: {local_dir} -> {pi_user}@{pi_host}:{remote_dir}"
+        )
+
+        ok, message = self._transfer_pi_resources(
+            local_dir=local_dir,
+            remote_dir=remote_dir,
+            pi_user=pi_user,
+            pi_host=pi_host,
+            pi_password=pi_password,
+        )
+
+        if ok:
+            restart_ok, restart_message = self._reboot_pi_after_update(pi_user, pi_host)
+            self.status_bar.showMessage("Deploy completed", 5000)
+            self.log_tab.append_log("Update completed successfully")
+            if restart_ok:
+                self.log_tab.append_log("Pi restart command sent")
+                QMessageBox.information(
+                    self,
+                    "Deploy Complete",
+                    "PI files were updated successfully. Service restart command sent to Pi.",
+                )
+            else:
+                self.log_tab.append_log(f"Deploy succeeded, but restart failed: {restart_message}")
+                QMessageBox.warning(
+                    self,
+                    "Deploy Complete (Restart Failed)",
+                    "PI files were updated successfully, but auto-restart failed.\n\n"
+                    f"Reason:\n{restart_message}",
+                )
+            return
+
+        self.status_bar.showMessage("Deploy failed", 8000)
+        self.log_tab.append_log(f"Deploy failed: {message}")
+        tip = "Tip: Verify Pi Username, Pi Password, and that the Pi is reachable."
+        QMessageBox.critical(
+            self,
+            "Deploy Failed",
+            f"Could not deploy files.\n\nReason:\n{message}\n\n{tip}",
+        )
+
+    def _transfer_pi_resources(
+        self,
+        local_dir: Path,
+        remote_dir: str,
+        pi_user: str,
+        pi_host: str,
+        pi_password: str,
+    ) -> tuple[bool, str]:
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            if paramiko is not None:
+                ok, message = self._deploy_via_sftp(
+                    host=pi_host,
+                    user=pi_user,
+                    password=pi_password,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+                if not ok:
+                    self.log_tab.append_log(f"SFTP deploy failed; trying SSH/SCP fallback: {message}")
+                    ok, message = self._deploy_via_scp_archive(
+                        host=pi_host,
+                        user=pi_user,
+                        local_dir=local_dir,
+                        remote_dir=remote_dir,
+                    )
+                if not ok:
+                    return ok, message
+                return self._prune_remote_resources(
+                    pi_user=pi_user,
+                    pi_host=pi_host,
+                    local_dir=local_dir,
+                    remote_dir=remote_dir,
+                )
+
+            self.log_tab.append_log("Paramiko unavailable; falling back to SSH/SCP deploy")
+            ok, message = self._deploy_via_scp_archive(
+                host=pi_host,
+                user=pi_user,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+            )
+            if not ok:
+                return ok, message
+            return self._prune_remote_resources(
+                pi_user=pi_user,
+                pi_host=pi_host,
+                local_dir=local_dir,
+                remote_dir=remote_dir,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _prune_remote_resources(
+        self,
+        pi_user: str,
+        pi_host: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        expected_files = sorted(
+            str(path.relative_to(local_dir)).replace("\\", "/")
+            for path in local_dir.rglob("*")
+            if path.is_file()
+        )
+        expected_payload = json.dumps(expected_files)
+
+        cleanup_snippet = "\n".join(
+            [
+                "import json",
+                "import pathlib",
+                f"root = pathlib.Path({remote_dir!r})",
+                f"expected = set(json.loads({expected_payload!r}))",
+                "root.mkdir(parents=True, exist_ok=True)",
+                "deleted_files = 0",
+                "deleted_dirs = 0",
+                "for path in [p for p in root.rglob('*') if p.is_file()] :",
+                "    rel = path.relative_to(root).as_posix()",
+                "    if rel not in expected:",
+                "        path.unlink(missing_ok=True)",
+                "        deleted_files += 1",
+                "dirs = sorted([p for p in root.rglob('*') if p.is_dir()], key=lambda p: len(p.parts), reverse=True)",
+                "for path in dirs:",
+                "    try:",
+                "        path.rmdir()",
+                "        deleted_dirs += 1",
+                "    except OSError:",
+                "        pass",
+                "print(f'Pruned {deleted_files} files and {deleted_dirs} directories')",
+            ]
+        )
+
+        ok, output = self._run_ssh_command(
+            pi_user,
+            pi_host,
+            f"python3 -c {shlex.quote(cleanup_snippet)}",
+        )
+        if not ok:
+            return False, f"File upload succeeded, but cleanup failed: {output}"
+
+        self.log_tab.append_log(output.strip() or "Remote cleanup completed")
+        return True, "OK"
+
+    @Slot()
+    def initialize_git_deploy(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_working_dir = "/home/pi/anglerfish"
+        remote_bare_repo = "/home/pi/anglerfish.git"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+
+        if not local_dir.exists() or not local_dir.is_dir():
+            QMessageBox.warning(
+                self,
+                "Init Failed",
+                self._local_pi_dir_not_found_message(local_dir),
+            )
+            return
+
+        if not pi_host:
+            QMessageBox.warning(self, "Init Failed", "Pi IP is empty.")
+            return
+
+        local_remote_url = f"ssh://{pi_user}@{pi_host}{remote_bare_repo}"
+        confirmation = QMessageBox.question(
+            self,
+            "Initialize Git Deploy",
+            (
+                "This sets up Git deploy automatically:\n\n"
+                f"1) Local repo: {local_dir}\n"
+                f"2) Local origin -> {local_remote_url}\n"
+                f"3) Remote bare repo: {remote_bare_repo}\n"
+                f"4) Remote working tree: {remote_working_dir}\n\n"
+                "Continue?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.status_bar.showMessage("Initializing Git deploy setup...")
+        self.log_tab.append_log("Initializing Git deploy setup")
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, message = self._initialize_git_deploy(
+                host=pi_host,
+                user=pi_user,
+                local_dir=local_dir,
+                remote_working_dir=remote_working_dir,
+                remote_bare_repo=remote_bare_repo,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if ok:
+            reboot_ok, reboot_message = self._reboot_pi_after_update(pi_user, pi_host)
+            self.status_bar.showMessage("Git deploy initialized", 6000)
+            self.log_tab.append_log("Git deploy initialized successfully")
+            if reboot_ok:
+                self.log_tab.append_log("Pi reboot command sent")
+                QMessageBox.information(
+                    self,
+                    "Init Complete",
+                    "Git deploy setup is complete. Reboot command sent to Pi.",
+                )
+            else:
+                self.log_tab.append_log(f"Git init succeeded, but reboot failed: {reboot_message}")
+                QMessageBox.warning(
+                    self,
+                    "Init Complete (Reboot Failed)",
+                    "Git deploy setup is complete, but auto-reboot failed.\n\n"
+                    f"Reason:\n{reboot_message}",
+                )
+            return
+
+        self.status_bar.showMessage("Git deploy init failed", 8000)
+        self.log_tab.append_log(f"Git deploy init failed: {message}")
+        QMessageBox.critical(self, "Init Failed", f"Could not initialize Git deploy.\n\n{message}")
+
+    @Slot()
+    def git_deploy_preflight_check(self):
+        local_dir = self._resolve_local_pi_dir()
+        remote_working_dir = "/home/pi/anglerfish"
+        remote_bare_repo = "/home/pi/anglerfish.git"
+        pi_user = self.pi_username_edit.text().strip() or "pi"
+        pi_host = self.pi_hostname_edit.text().strip()
+
+        if not pi_host:
+            QMessageBox.warning(self, "Preflight Failed", "Pi IP is empty.")
+            return
+
+        self.status_bar.showMessage("Running Git deploy preflight check...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ok, lines = self._run_git_deploy_preflight(
+                host=pi_host,
+                user=pi_user,
+                local_dir=local_dir,
+                remote_working_dir=remote_working_dir,
+                remote_bare_repo=remote_bare_repo,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        for line in lines:
+            self.log_tab.append_log(f"[Preflight] {line}")
+
+        if ok:
+            self.status_bar.showMessage("Git deploy preflight passed", 6000)
+            QMessageBox.information(
+                self,
+                "Preflight Passed",
+                "Git deploy preflight passed. Deploy should work.",
+            )
+        else:
+            self.status_bar.showMessage("Git deploy preflight failed", 8000)
+            QMessageBox.warning(
+                self,
+                "Preflight Issues Found",
+                "Git deploy preflight found issues. See Log tab for details.",
+            )
+
+    def _deploy_via_git(
+        self,
+        host: str,
+        user: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        try:
+            local_dir_str = str(local_dir)
+            local_repo_check = subprocess.run(
+                ["git", "-C", local_dir_str, "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if local_repo_check.returncode != 0:
+                return False, "Local PI folder is not a Git repository"
+
+            origin_check = subprocess.run(
+                ["git", "-C", local_dir_str, "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if origin_check.returncode != 0:
+                return False, "Local PI repository has no 'origin' remote configured"
+
+            dirty_check = subprocess.run(
+                ["git", "-C", local_dir_str, "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if dirty_check.returncode != 0:
+                return False, (dirty_check.stderr or dirty_check.stdout or "Failed to check local repo state").strip()
+            if dirty_check.stdout.strip():
+                return False, "Local PI repository has uncommitted changes; commit or stash before deploy"
+
+            ok, output = self._run_git_push_command(
+                ["git", "-C", local_dir_str, "push", "origin", "main"]
+            )
+            if not ok:
+                return False, output
+
+            remote_quoted = shlex.quote(remote_dir)
+            ssh_prefix = self._build_ssh_prefix(user, host)
+
+            remote_pull_command = (
+                f"mkdir -p {remote_quoted} && "
+                f"cd {remote_quoted} && "
+                "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && "
+                "git pull --ff-only"
+            )
+            remote_pull_result = subprocess.run(
+                ssh_prefix + [remote_pull_command],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if remote_pull_result.returncode != 0:
+                return False, (
+                    remote_pull_result.stderr
+                    or remote_pull_result.stdout
+                    or "Remote git pull failed (is /home/pi/anglerfish a Git repo?)"
+                ).strip()
+
+            return True, "OK"
+        except FileNotFoundError:
+            return False, "Required executable not found (git or ssh)"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _sftp_mkdir_p(self, sftp, remote_path: str) -> None:
+        """Recursively create remote directories via an open SFTP session."""
+        parts = [p for p in remote_path.split("/") if p]
+        current = ""
+        for part in parts:
+            current += "/" + part
+            try:
+                sftp.stat(current)
+            except IOError:
+                sftp.mkdir(current)
+
+    def _deploy_via_sftp(
+        self,
+        host: str,
+        user: str,
+        password: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        """Copy all files from local_dir to remote_dir on the Pi using Paramiko SFTP."""
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=host,
+                username=user,
+                password=password,
+                timeout=8,
+                auth_timeout=8,
+                banner_timeout=8,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+            sftp = client.open_sftp()
+            self._sftp_mkdir_p(sftp, remote_dir)
+
+            for local_file in sorted(local_dir.rglob("*")):
+                if not local_file.is_file():
+                    continue
+                relative = local_file.relative_to(local_dir)
+                remote_path = remote_dir + "/" + str(relative).replace("\\", "/")
+                remote_parent = remote_dir + "/" + str(relative.parent).replace("\\", "/")
+                if str(relative.parent) != ".":
+                    self._sftp_mkdir_p(sftp, remote_parent)
+                sftp.put(str(local_file), remote_path)
+
+            sftp.close()
+            client.close()
+            return True, "OK"
+        except Exception as exc:
+            error_text = str(exc)
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
+
+    def _deploy_via_scp_archive(
+        self,
+        host: str,
+        user: str,
+        local_dir: Path,
+        remote_dir: str,
+    ) -> tuple[bool, str]:
+        """Copy a zip archive over SCP and unpack it on the Pi using the local SSH link."""
+        archive_path = None
+        remote_archive = f"/tmp/anglerfish_update_{int(time.time())}.zip"
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as archive_file:
+                archive_path = archive_file.name
+
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for local_file in sorted(local_dir.rglob("*")):
+                    if not local_file.is_file():
+                        continue
+                    archive.write(local_file, arcname=str(local_file.relative_to(local_dir)))
+
+            scp_args = self._build_scp_prefix() + [
+                archive_path,
+                f"{user}@{host}:{remote_archive}",
+            ]
+            ok, output = self._run_ssh_subprocess_command(
+                scp_args,
+                user=user,
+                host=host,
+                failure_text="SCP copy failed",
+                timeout=60,
+            )
+            if not ok:
+                return False, output
+
+            python_snippet = (
+                "import os, zipfile; "
+                f"os.makedirs({remote_dir!r}, exist_ok=True); "
+                f"zipfile.ZipFile({remote_archive!r}).extractall({remote_dir!r})"
+            )
+            unpack_command = (
+                f"mkdir -p {shlex.quote(remote_dir)} && "
+                f"python3 -c {shlex.quote(python_snippet)} && "
+                f"rm -f {shlex.quote(remote_archive)}"
+            )
+            ok, output = self._run_ssh_command(user, host, unpack_command)
+            if not ok:
+                return False, output
+
+            return True, "OK"
+        except Exception as exc:
+            error_text = str(exc)
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
+        finally:
+            if archive_path:
+                try:
+                    os.remove(archive_path)
+                except OSError:
+                    pass
+
+    def _run_local_command(self, args: list[str], cwd: Optional[str] = None) -> tuple[bool, str]:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout or "Command failed").strip()
+        return True, (result.stdout or "").strip()
+
+    def _run_git_push_command(self, args: list[str]) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        if not password:
+            return self._run_local_command(args)
+
+        askpass_path = None
+        try:
+            with tempfile.NamedTemporaryFile("w", delete=False, suffix=".cmd", encoding="utf-8") as askpass_file:
+                askpass_file.write("@echo off\r\n")
+                askpass_file.write("echo %ANGLERFISH_SSH_PASSWORD%\r\n")
+                askpass_path = askpass_file.name
+
+            env = os.environ.copy()
+            env["ANGLERFISH_SSH_PASSWORD"] = password
+            env["SSH_ASKPASS"] = askpass_path
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            env["DISPLAY"] = "anglerfish"
+            env["GIT_SSH_COMMAND"] = (
+                "ssh -o BatchMode=no "
+                "-o PreferredAuthentications=publickey,password,keyboard-interactive "
+                "-o StrictHostKeyChecking=accept-new "
+                "-o ConnectTimeout=8"
+            )
+
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or "git push failed").strip()
+                hint = self._classify_ssh_error(
+                    self.pi_username_edit.text().strip() or "pi",
+                    self.pi_hostname_edit.text().strip(),
+                    error_text,
+                )
+                if hint:
+                    return False, f"{error_text}\nHint: {hint}"
+                return False, error_text
+            return True, (result.stdout or "").strip()
+        finally:
+            if askpass_path:
+                try:
+                    os.remove(askpass_path)
+                except OSError:
+                    pass
+
+    def _build_ssh_prefix(self, user: str, host: str) -> list[str]:
+        return [
+            "ssh",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "PreferredAuthentications=publickey,password,keyboard-interactive",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=8",
+            f"{user}@{host}",
+        ]
+
+    def _build_scp_prefix(self) -> list[str]:
+        return [
+            "scp",
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "PreferredAuthentications=publickey,password,keyboard-interactive",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=8",
+        ]
+
+    def _get_ssh_password(self) -> str:
+        return self.pi_password_edit.text()
+
+    def _classify_ssh_error(self, user: str, host: str, raw_error: str) -> Optional[str]:
+        text = (raw_error or "").lower()
+        if not text:
+            return None
+
+        if "permission denied" in text:
+            return (
+                f"Authentication failed for {user}@{host}. Verify Pi Username and Pi Password in the UI, then test with: "
+                f"ssh {user}@{host}."
+            )
+        if "host key verification failed" in text or "remote host identification has changed" in text:
+            return (
+                f"Host key mismatch for {host}. Remove/update the old key in known_hosts, then reconnect."
+            )
+        if "could not resolve hostname" in text or "name or service not known" in text:
+            return f"Host {host} could not be resolved. Check Pi IP or local DNS/mDNS."
+        if "connection timed out" in text or "operation timed out" in text:
+            return f"Connection to {host} timed out. Check network, power, and SSH service on the Pi."
+        if "connection refused" in text:
+            return f"SSH port refused on {host}. Ensure SSH is enabled and running on the Pi."
+        if "no route to host" in text or "network is unreachable" in text:
+            return f"No network route to {host}. Verify both devices are on the same reachable network."
+        return None
+
+    @staticmethod
+    def _inject_sudo_password(command: str, password: str) -> str:
+        """If command begins with sudo, rewrite to sudo -S and feed password via stdin pipe."""
+        stripped = (command or "").strip()
+        if not stripped.startswith("sudo "):
+            return command
+        sudo_body = stripped[len("sudo "):].strip()
+        return f"printf '%s\\n' {shlex.quote(password)} | sudo -S -p '' {sudo_body}"
+
+    def _run_ssh_command(self, user: str, host: str, command: str) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        command_to_run = self._inject_sudo_password(command, password) if password else command
+        if password:
+            if paramiko is not None:
+                try:
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    client.connect(
+                        hostname=host,
+                        username=user,
+                        password=password,
+                        timeout=8,
+                        auth_timeout=8,
+                        banner_timeout=8,
+                        look_for_keys=False,
+                        allow_agent=False,
+                    )
+                    stdin, stdout, stderr = client.exec_command(command_to_run, timeout=25)
+                    _ = stdin
+                    out_text = stdout.read().decode("utf-8", errors="replace").strip()
+                    err_text = stderr.read().decode("utf-8", errors="replace").strip()
+                    exit_code = stdout.channel.recv_exit_status()
+                    client.close()
+                    if exit_code != 0:
+                        error_text = err_text or out_text or "SSH command failed"
+                        hint = self._classify_ssh_error(user, host, error_text)
+                        if hint:
+                            return False, f"{error_text}\nHint: {hint}"
+                        return False, error_text
+                    return True, out_text
+                except Exception as exc:
+                    error_text = str(exc)
+                    hint = self._classify_ssh_error(user, host, error_text)
+                    if hint:
+                        return False, f"{error_text}\nHint: {hint}"
+                    return False, error_text
+
+            ssh_prefix = self._build_ssh_prefix(user, host)
+            return self._run_ssh_subprocess_command(
+                ssh_prefix + [command_to_run],
+                user=user,
+                host=host,
+                failure_text="SSH command failed",
+                timeout=25,
+            )
+
+        ssh_prefix = self._build_ssh_prefix(user, host)
+        result = subprocess.run(
+            ssh_prefix + [command_to_run],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            error_text = (result.stderr or result.stdout or "SSH command failed").strip()
+            hint = self._classify_ssh_error(user, host, error_text)
+            if hint:
+                return False, f"{error_text}\nHint: {hint}"
+            return False, error_text
+        return True, (result.stdout or "").strip()
+
+    def _run_ssh_subprocess_command(
+        self,
+        args: list[str],
+        user: str,
+        host: str,
+        failure_text: str,
+        timeout: int,
+    ) -> tuple[bool, str]:
+        password = self._get_ssh_password()
+        askpass_path = None
+        try:
+            env = os.environ.copy()
+            if password:
+                with tempfile.NamedTemporaryFile("w", delete=False, suffix=".cmd", encoding="utf-8") as askpass_file:
+                    askpass_file.write("@echo off\r\n")
+                    askpass_file.write("echo %ANGLERFISH_SSH_PASSWORD%\r\n")
+                    askpass_path = askpass_file.name
+
+                env["ANGLERFISH_SSH_PASSWORD"] = password
+                env["SSH_ASKPASS"] = askpass_path
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                env["GIT_TERMINAL_PROMPT"] = "0"
+                env["DISPLAY"] = "anglerfish"
+
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                error_text = (result.stderr or result.stdout or failure_text).strip()
+                hint = self._classify_ssh_error(user, host, error_text)
+                if hint:
+                    return False, f"{error_text}\nHint: {hint}"
+                return False, error_text
+            return True, (result.stdout or "").strip()
+        except FileNotFoundError:
+            return False, "Required executable not found (ssh/scp)"
+        except subprocess.TimeoutExpired:
+            return False, f"{failure_text} timed out"
+        finally:
+            if askpass_path:
+                try:
+                    os.remove(askpass_path)
+                except OSError:
+                    pass
+
+    def _restart_anglerfish_service(self, pi_user: str, pi_host: str) -> tuple[bool, str]:
+        restart_cmd = "sudo systemctl restart anglerfish.target"
+        ok, output = self._run_ssh_command(pi_user, pi_host, restart_cmd)
+        if not ok:
+            return False, output
+        return True, output or "Service restart command accepted"
+
+    def _reboot_pi(self, pi_user: str, pi_host: str) -> tuple[bool, str]:
+        reboot_cmd = "nohup sh -c 'sleep 1; sudo reboot' >/dev/null 2>&1 &"
+        ok, output = self._run_ssh_command(pi_user, pi_host, reboot_cmd)
+        if not ok:
+            return False, output
+        return True, output or "Reboot command accepted"
+
+    def _reboot_pi_after_update(self, user: str, host: str) -> tuple[bool, str]:
+        return self._restart_anglerfish_service(user, host)
+
+    def _initialize_git_deploy(
+        self,
+        host: str,
+        user: str,
+        local_dir: Path,
+        remote_working_dir: str,
+        remote_bare_repo: str,
+    ) -> tuple[bool, str]:
+        try:
+            local_dir_str = str(local_dir)
+
+            # Check if local_dir already sits inside a parent git repo (e.g. the main project repo).
+            # If the git root is not local_dir itself, we must init a fresh repo scoped to local_dir
+            # rather than contaminating the parent repo's remotes.
+            root_check = self._run_local_command(
+                ["git", "-C", local_dir_str, "rev-parse", "--show-toplevel"]
+            )
+            own_repo = root_check[0] and Path(root_check[1]).resolve() == local_dir.resolve()
+
+            if not own_repo:
+                # Initialise a new git repo scoped exactly to local_dir
+                ok, output = self._run_local_command(
+                    ["git", "-C", local_dir_str, "init", "-b", "main"]
+                )
+                if not ok:
+                    ok, output = self._run_local_command(["git", "-C", local_dir_str, "init"])
+                    if not ok:
+                        return False, f"Local git init failed: {output}"
+                    ok, output = self._run_local_command(
+                        ["git", "-C", local_dir_str, "checkout", "-B", "main"]
+                    )
+                    if not ok:
+                        return False, f"Local main branch setup failed: {output}"
+
+            ok, output = self._run_local_command(["git", "-C", local_dir_str, "checkout", "-B", "main"])
+            if not ok:
+                return False, f"Local main branch setup failed: {output}"
+
+            remote_bare_quoted = shlex.quote(remote_bare_repo)
+            remote_setup_bare_command = f"mkdir -p {remote_bare_quoted} && git init --bare {remote_bare_quoted}"
+            ok, output = self._run_ssh_command(user, host, remote_setup_bare_command)
+            if not ok:
+                return False, f"Remote bare repository setup failed: {output}"
+
+            local_remote_url = f"ssh://{user}@{host}{remote_bare_repo}"
+            ok, output = self._run_local_command(["git", "-C", local_dir_str, "remote", "remove", "origin"])
+            if not ok and "No such remote" not in output:
+                return False, f"Failed to reset local origin: {output}"
+
+            ok, output = self._run_local_command(
+                ["git", "-C", local_dir_str, "remote", "add", "origin", local_remote_url]
+            )
+            if not ok:
+                return False, f"Failed to set local origin: {output}"
+
+            ok, output = self._run_local_command(["git", "-C", local_dir_str, "add", "-A"])
+            if not ok:
+                return False, f"Failed to stage local files: {output}"
+
+            ok, status_output = self._run_local_command(
+                ["git", "-C", local_dir_str, "status", "--porcelain"]
+            )
+            if not ok:
+                return False, f"Failed to inspect local status: {status_output}"
+
+            if status_output.strip():
+                ok, output = self._run_local_command(
+                    ["git", "-C", local_dir_str, "commit", "-m", "Initialize PI deploy"]
+                )
+                if not ok and "nothing to commit" not in output:
+                    return False, f"Initial local commit failed: {output}"
+
+            ok, output = self._run_git_push_command(
+                ["git", "-C", local_dir_str, "push", "-u", "origin", "main"]
+            )
+            if not ok:
+                return False, f"Initial push failed: {output}"
+
+            remote_working_quoted = shlex.quote(remote_working_dir)
+            remote_setup_working_command = (
+                f"mkdir -p {remote_working_quoted} && "
+                f"git -C {remote_working_quoted} init -b main >/dev/null 2>&1 || git -C {remote_working_quoted} init && "
+                f"git -C {remote_working_quoted} remote remove origin >/dev/null 2>&1 || true && "
+                f"git -C {remote_working_quoted} remote add origin {remote_bare_quoted} && "
+                f"git -C {remote_working_quoted} fetch origin main && "
+                f"git -C {remote_working_quoted} checkout -B main && "
+                f"git -C {remote_working_quoted} branch --set-upstream-to=origin/main main && "
+                f"git -C {remote_working_quoted} pull --ff-only origin main"
+            )
+            ok, output = self._run_ssh_command(user, host, remote_setup_working_command)
+            if not ok:
+                return False, f"Remote working tree setup failed: {output}"
+
+            return True, "OK"
+        except FileNotFoundError:
+            return False, "Required executable not found (git or ssh)"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _run_git_deploy_preflight(
+        self,
+        host: str,
+        user: str,
+        local_dir: Path,
+        remote_working_dir: str,
+        remote_bare_repo: str,
+    ) -> tuple[bool, list[str]]:
+        lines = []
+        all_ok = True
+        local_dir_str = str(local_dir)
+
+        ok, output = self._run_local_command(["git", "--version"])
+        if ok:
+            lines.append(f"OK local git: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local git not available: {output}")
+
+        ok, output = self._run_local_command(["ssh", "-V"])
+        if ok:
+            lines.append("OK local ssh executable found")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local ssh not available: {output}")
+
+        if local_dir.exists() and local_dir.is_dir():
+            lines.append(f"OK local PI folder exists: {local_dir}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local PI folder missing: {local_dir}")
+
+        ok, output = self._run_local_command(
+            ["git", "-C", local_dir_str, "rev-parse", "--is-inside-work-tree"]
+        )
+        if ok:
+            lines.append("OK local PI folder is a Git repository")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local PI folder is not a Git repository: {output}")
+
+        ok, output = self._run_local_command(
+            ["git", "-C", local_dir_str, "remote", "get-url", "origin"]
+        )
+        if ok:
+            lines.append(f"OK local origin remote: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local origin remote missing: {output}")
+
+        ok, output = self._run_local_command(["git", "-C", local_dir_str, "status", "--porcelain"])
+        if ok and not output.strip():
+            lines.append("OK local working tree clean")
+        elif ok:
+            all_ok = False
+            lines.append("FAIL local working tree has uncommitted changes")
+        else:
+            all_ok = False
+            lines.append(f"FAIL local status check failed: {output}")
+
+        ok, output = self._run_ssh_command(user, host, "echo connected")
+        if ok:
+            lines.append(f"OK SSH connectivity to {user}@{host}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL SSH connectivity to {user}@{host}: {output}")
+            return all_ok, lines
+
+        ok, output = self._run_ssh_command(user, host, "git --version")
+        if ok:
+            lines.append(f"OK remote git: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL remote git not available: {output}")
+
+        remote_working_quoted = shlex.quote(remote_working_dir)
+        remote_bare_quoted = shlex.quote(remote_bare_repo)
+
+        ok, output = self._run_ssh_command(
+            user,
+            host,
+            f"git -C {remote_working_quoted} rev-parse --is-inside-work-tree",
+        )
+        if ok:
+            lines.append(f"OK remote working repo exists: {remote_working_dir}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL remote working repo missing or invalid at {remote_working_dir}: {output}")
+
+        ok, output = self._run_ssh_command(
+            user,
+            host,
+            f"git -C {remote_working_quoted} remote get-url origin",
+        )
+        if ok:
+            lines.append(f"OK remote working origin: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL remote working origin missing: {output}")
+
+        ok, output = self._run_ssh_command(
+            user,
+            host,
+            f"git -C {remote_working_quoted} rev-parse --abbrev-ref --symbolic-full-name @{{u}}",
+        )
+        if ok:
+            lines.append(f"OK remote upstream branch: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL remote upstream branch not set: {output}")
+
+        ok, output = self._run_ssh_command(
+            user,
+            host,
+            f"git --git-dir {remote_bare_quoted} rev-parse --is-bare-repository",
+        )
+        if ok and output.strip() == "true":
+            lines.append(f"OK remote bare repository exists: {remote_bare_repo}")
+        elif ok:
+            all_ok = False
+            lines.append(f"FAIL remote bare repository check returned unexpected value: {output}")
+        else:
+            all_ok = False
+            lines.append(f"FAIL remote bare repository missing or invalid at {remote_bare_repo}: {output}")
+
+        if all_ok:
+            lines.append("SUMMARY: preflight passed")
+        else:
+            lines.append("SUMMARY: preflight found issues")
+
+        return all_ok, lines
+
+    def closeEvent(self, event):
+        self._save_connection_history()
+        self._stop_controller_polling()
+        self.stop_links()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
