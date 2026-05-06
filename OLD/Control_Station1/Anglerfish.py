@@ -24,7 +24,7 @@ except ImportError:
     pygame = None
 
 try:
-    import xbox360_controller
+    import OLD.Control_Station1.xbox360_controller as xbox360_controller
 except ImportError:
     xbox360_controller = None
 

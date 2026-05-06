@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import pygame
-import xbox360_controller  # local file in this folder (pygame-xbox360controller)
+import OLD.Control_Station1.xbox360_controller as xbox360_controller  # local file in this folder (pygame-xbox360controller)
 
 pygame.init()
 

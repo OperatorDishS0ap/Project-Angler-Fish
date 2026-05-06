@@ -13,7 +13,7 @@ WIDTH = 1280
 HEIGHT = 720
 FPS = 30
 BITRATE = 4_000_000
-RTP_HOST = "192.168.1.52"
+RTP_HOST = "192.168.50.3"
 RTP_PORT = int(os.environ.get("ANGLERFISH_RTP_PORT", "5600"))
 
 running = True

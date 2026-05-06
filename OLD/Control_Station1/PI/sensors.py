@@ -6,9 +6,9 @@ import socket
 import time
 import math
 from typing import Optional
-from bar30_sensor import init_bar30, read_bar30
-from mpu6050_sensor import accel_to_pitch_roll, calibrate_gyro, init_imu_with_retry, read_imu
-from ads1015_sensor import init_ads1015, read_ads1015
+from OLD.Control_Station1.PI.bar30_sensor import init_bar30, read_bar30
+from OLD.Control_Station1.PI.mpu6050_sensor import accel_to_pitch_roll, calibrate_gyro, init_imu_with_retry, read_imu
+from OLD.Control_Station1.PI.ads1015_sensor import init_ads1015, read_ads1015
 
 USE_BROADCAST = os.environ.get("ANGLERFISH_USE_BROADCAST", "1") == "1"
 BROADCAST_IP = os.environ.get("ANGLERFISH_BROADCAST_IP", "255.255.255.255")
